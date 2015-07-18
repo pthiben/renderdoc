@@ -106,12 +106,19 @@ struct ShaderDebugState
 	uint32_t nextInstruction;
 };
 
+struct ModificationValue;
+
 struct ShaderDebugTrace
 {
 	rdctype::array<ShaderVariable> inputs;
 	rdctype::array< rdctype::array<ShaderVariable> > cbuffers;
 
 	rdctype::array<ShaderDebugState> states;
+
+	uint32_t sampleIdx;
+	uint32_t primitiveID;
+
+	rdctype::array<ModificationValue> refVals;
 };
 
 struct SigParameter

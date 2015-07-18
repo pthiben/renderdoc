@@ -1668,6 +1668,9 @@ ShaderDebugTrace D3D11DebugManager::DebugPixel(uint32_t frameID, uint32_t eventI
 	GlobalState global;
 	CreateShaderGlobalState(global, dxbc, rs->OM.UAVStartSlot, rs->OM.UAVs, rs->PS.SRVs);
 
+	traces[destIdx].sampleIdx = winner->sample;
+	traces[destIdx].primitiveID = winner->primitive;
+
 	{
 		DebugHit *hit = winner;
 

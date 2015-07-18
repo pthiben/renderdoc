@@ -53,6 +53,8 @@ namespace renderdocui.Windows
         private List<int> BreakpointMarkers = new List<int>();
         private List<int> FinishedMarkers = new List<int>();
 
+        private List<int> m_Mismatches = new List<int>();
+
         private Core m_Core = null;
         private ShaderReflection m_ShaderDetails = null;
         private D3D11PipelineState.ShaderStage m_Stage = null;
@@ -221,6 +223,9 @@ namespace renderdocui.Windows
                 outSig.Font =
                 core.Config.PreferredFont;
 
+            mismatch.Visible = false;
+            mismatchMoreInfo.Visible = false;
+
             Icon = global::renderdocui.Properties.Resources.icon;
 
             this.SuspendLayout();
@@ -382,6 +387,41 @@ namespace renderdocui.Windows
             }
         }
 
+        // these functions check if the expected output (from pixel history)
+        // and debugged output (from shader debugging) are similar enough to
+        // not cause alarm.
+        bool Similar(float a, float b)
+        {
+            a = Math.Abs(a);
+            b = Math.Abs(b);
+            float highest = Math.Max(a, b);
+            float lowest = Math.Min(a, b);
+
+            return lowest >= highest * 0.99f;
+        }
+
+        bool Similar(UInt32 a, UInt32 b)
+        {
+            UInt32 highest = Math.Max(a, b);
+            UInt32 lowest = Math.Min(a, b);
+
+            UInt32 margin = (highest >> 8);
+
+            return lowest >= highest - margin;
+        }
+
+        bool Similar(Int32 a, Int32 b)
+        {
+            a = Math.Abs(a);
+            b = Math.Abs(b);
+            Int32 highest = Math.Max(a, b);
+            Int32 lowest = Math.Min(a, b);
+
+            Int32 margin = (highest >> 8);
+
+            return lowest >= highest - margin;
+        }
+
         public ShaderViewer(Core core, ShaderReflection shader, ShaderStageType stage, ShaderDebugTrace trace, string debugContext)
         {
             InitializeComponent();
@@ -426,6 +466,55 @@ namespace renderdocui.Windows
                 Text = m_Core.CurPipelineState.GetShaderName(stage);
 
             var disasm = shader.Disassembly;
+
+            mismatch.Visible = mismatchMoreInfo.Visible = false;
+
+            if (trace != null)
+            {
+                ShaderVariable[] finalOutputs = m_Trace.states.Last().outputs;
+                for (int i = 0; i < finalOutputs.Length && i < m_Trace.refVals.Length; i++)
+                {
+                    if (m_Trace.refVals[i].depth >= 0.0f)
+                    {
+                        if (finalOutputs[i].type == VarType.Float)
+                        {
+                            for (int c = 0; c < finalOutputs[i].columns; c++)
+                            {
+                                if (!Similar(finalOutputs[i].value.fv[c], m_Trace.refVals[i].col.value.f[c]))
+                                {
+                                    m_Mismatches.Add(i);
+                                    break;
+                                }
+                            }
+                        }
+                        else if (finalOutputs[i].type == VarType.UInt)
+                        {
+                            for (int c = 0; c < finalOutputs[i].columns; c++)
+                            {
+                                if (!Similar(finalOutputs[i].value.uv[c], m_Trace.refVals[i].col.value.u[c]))
+                                {
+                                    m_Mismatches.Add(i);
+                                    break;
+                                }
+                            }
+                        }
+                        else if (finalOutputs[i].type == VarType.Int)
+                        {
+                            for (int c = 0; c < finalOutputs[i].columns; c++)
+                            {
+                                if (!Similar(finalOutputs[i].value.iv[c], m_Trace.refVals[i].col.value.i[c]))
+                                {
+                                    m_Mismatches.Add(i);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if(m_Mismatches.Count > 0)
+                    mismatch.Visible = mismatchMoreInfo.Visible = true;
+            }
 
             if (m_Core.Config.ShaderViewer_FriendlyNaming)
             {
@@ -1935,6 +2024,41 @@ namespace renderdocui.Windows
         private void ShaderViewer_FormClosed(object sender, FormClosedEventArgs e)
         {
             m_Core.RemoveLogViewer(this);
+        }
+
+        private void mismatchMoreInfo_Click(object sender, EventArgs e)
+        {
+            string report = "";
+            ShaderVariable[] finalOutputs = m_Trace.states.Last().outputs;
+            for (int i = 0; i < finalOutputs.Length && i < m_Trace.refVals.Length; i++)
+            {
+                if (!m_Mismatches.Contains(i))
+                    continue;
+
+                ShaderVariable var = new ShaderVariable();
+                var.type = finalOutputs[i].type;
+                var.rows = finalOutputs[i].rows;
+                var.columns = finalOutputs[i].columns;
+                var.isStruct = false;
+                var.members = new ShaderVariable[0];
+                var.value = new ShaderVariable.ValueUnion();
+                var.value.fv = m_Trace.refVals[i].col.value.f;
+                var.value.uv = m_Trace.refVals[i].col.value.u;
+                var.value.iv = m_Trace.refVals[i].col.value.i;
+
+                report += String.Format("{0}-\ndebugged: {1}\nexpected: {2}\n\n",
+                    finalOutputs[i].name, finalOutputs[i].ToString(), var.ToString());
+            }
+
+            string text = "RenderDoc detected a mismatch between the shader output fetched from pixel history," +
+                "and the result of the debugging below.\n\n" +
+                "This could be minor and unimportant, or it could mean the debugging is invalid.\n\n" + 
+                "The cause could be one of several things, but most likely it means a bug in the shader debugging.\n\n" +
+                "If you get in contact with me (baldurk@baldurk.org) I will be able to help investigate, " +
+                "especially if you can send me the logfile.\n\n" +
+                report;
+
+            MessageBox.Show(text, "Mismatch detected between expected and debugged results", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 }

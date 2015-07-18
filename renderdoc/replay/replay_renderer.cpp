@@ -1214,7 +1214,58 @@ bool ReplayRenderer::DebugPixel(uint32_t x, uint32_t y, uint32_t sample, uint32_
 	if(trace == NULL) return false;
 
 	*trace = m_pDevice->DebugPixel(m_FrameID, m_EventID, x, y, sample, primitive);
+
+	vector<EventUsage> events; events.push_back(EventUsage(m_EventID, eUsage_ColourTarget));
 	
+	ResourceId outs[8];
+	uint32_t slices[8];
+	uint32_t mips[8];
+
+	if(m_pDevice->GetAPIProperties().pipelineType == ePipelineState_D3D11)
+	{
+		for(int32_t i=0; i < 8 && i < m_D3D11PipelineState.m_OM.RenderTargets.count; i++)
+		{
+			outs[i] = m_D3D11PipelineState.m_OM.RenderTargets[i].Resource;
+			slices[i] = m_D3D11PipelineState.m_OM.RenderTargets[i].FirstArraySlice;
+			mips[i] = m_D3D11PipelineState.m_OM.RenderTargets[i].HighestMip;
+		}
+	}
+	else if(m_pDevice->GetAPIProperties().pipelineType == ePipelineState_OpenGL)
+	{
+		for(int32_t i=0; i < 8 && i < m_GLPipelineState.m_FB.m_DrawFBO.DrawBuffers.count; i++)
+		{
+			int32_t idx = m_GLPipelineState.m_FB.m_DrawFBO.DrawBuffers[i];
+			outs[i] = m_GLPipelineState.m_FB.m_DrawFBO.Color[i];
+			slices[i] = m_GLPipelineState.m_FB.m_DrawFBO.Layer[i];
+			mips[i] = m_GLPipelineState.m_FB.m_DrawFBO.Mip[i];
+		}
+	}
+	else
+	{
+		RDCERR("Unknown pipeline type");
+	}
+
+	rdctype::create_array(trace->refVals, 8);
+
+	for(size_t i=0; i < 8; i++)
+	{
+		if(outs[i] == ResourceId())
+		{
+			trace->refVals[i].depth = -1.0f;
+			continue;
+		}
+
+		SetFrameEvent(m_FrameID, m_EventID, true);
+
+		vector<PixelModification> refOutput = m_pDevice->PixelHistory(m_FrameID, events, m_pDevice->GetLiveID(outs[i]), x, y, slices[i], mips[i], trace->sampleIdx);
+
+		for(size_t p=0; p < refOutput.size(); p++)
+		{
+			if(refOutput[p].primitiveID == trace->primitiveID)
+				trace->refVals[i] = refOutput[p].shaderOut;
+		}
+	}
+
 	SetFrameEvent(m_FrameID, m_EventID, true);
 
 	return true;

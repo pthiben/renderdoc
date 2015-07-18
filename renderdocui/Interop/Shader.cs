@@ -198,6 +198,12 @@ namespace renderdoc
 
         [CustomMarshalAs(CustomUnmanagedType.TemplatedArray)]
         public ShaderDebugState[] states;
+
+        public UInt32 sampleIdx;
+        public UInt32 primitiveID;
+
+        [CustomMarshalAs(CustomUnmanagedType.TemplatedArray)]
+        public ModificationValue[] refVals;
     };
     
     [StructLayout(LayoutKind.Sequential)]

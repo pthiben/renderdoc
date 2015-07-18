@@ -269,7 +269,12 @@ void Serialiser::Serialise(const char *name, ShaderDebugTrace &el)
 
 	Serialise("", el.states);
 
-	SIZE_CHECK(ShaderDebugTrace, 24);
+	Serialise("", el.sampleIdx);
+	Serialise("", el.primitiveID);
+
+	Serialise("", el.refVals);
+
+	SIZE_CHECK(ShaderDebugTrace, 40);
 }
 
 #pragma endregion General Shader/State
@@ -851,6 +856,16 @@ void Serialiser::Serialise(const char *name, CounterDescription &el)
 }
 
 template<>
+void Serialiser::Serialise(const char *name, ModificationValue &el)
+{
+	Serialise<4>("", el.col.value_u);
+	Serialise("", el.depth);
+	Serialise("", el.stencil);
+
+	SIZE_CHECK(ModificationValue, 24);
+}
+
+template<>
 void Serialiser::Serialise(const char *name, PixelModification &el)
 {
 	Serialise("", el.eventID);
@@ -859,15 +874,9 @@ void Serialiser::Serialise(const char *name, PixelModification &el)
 	Serialise("", el.fragIndex);
 	Serialise("", el.primitiveID);
 
-	Serialise<4>("", el.preMod.col.value_u);
-	Serialise("", el.preMod.depth);
-	Serialise("", el.preMod.stencil);
-	Serialise<4>("", el.shaderOut.col.value_u);
-	Serialise("", el.shaderOut.depth);
-	Serialise("", el.shaderOut.stencil);
-	Serialise<4>("", el.postMod.col.value_u);
-	Serialise("", el.postMod.depth);
-	Serialise("", el.postMod.stencil);
+	Serialise("", el.preMod);
+	Serialise("", el.shaderOut);
+	Serialise("", el.postMod);
 	
 	Serialise("", el.backfaceCulled);
 	Serialise("", el.depthClipped);
