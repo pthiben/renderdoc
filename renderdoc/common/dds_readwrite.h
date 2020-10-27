@@ -1,18 +1,18 @@
 /******************************************************************************
  * The MIT License (MIT)
- * 
- * Copyright (c) 2014-2016 Baldur Karlsson
- * 
+ *
+ * Copyright (c) 2019-2020 Baldur Karlsson
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
  * in the Software without restriction, including without limitation the rights
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -24,25 +24,27 @@
 
 #pragma once
 
-#include "api/replay/renderdoc_replay.h"
+#include <stdio.h>
+#include "api/replay/data_types.h"
+#include "serialise/streamio.h"
 
 struct dds_data
 {
-	int width;
-	int height;
-	int depth;
+  uint32_t width;
+  uint32_t height;
+  uint32_t depth;
 
-	int mips;
-	int slices;
+  uint32_t mips;
+  uint32_t slices;
 
-	bool cubemap;
+  bool cubemap;
 
-	ResourceFormat format;
+  ResourceFormat format;
 
-	byte **subdata;
-	uint32_t *subsizes;
+  byte **subdata;
+  uint32_t *subsizes;
 };
 
-extern bool is_dds_file(FILE *f);
-extern dds_data load_dds_from_file(FILE *f);
+extern bool is_dds_file(byte *headerBuffer, size_t size);
+extern dds_data load_dds_from_file(StreamReader *reader);
 extern bool write_dds_to_file(FILE *f, const dds_data &data);

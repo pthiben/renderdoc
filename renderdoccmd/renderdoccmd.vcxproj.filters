@@ -7,6 +7,8 @@
       <Filter>3rdparty</Filter>
     </ClCompile>
     <ClCompile Include="renderdoccmd_linux.cpp" />
+    <ClCompile Include="renderdoccmd_android.cpp" />
+    <ClCompile Include="renderdoccmd_apple.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h">
@@ -16,6 +18,10 @@
       <Filter>Resources</Filter>
     </ClInclude>
     <ClInclude Include="..\renderdoc\3rdparty\miniz\miniz.h">
+      <Filter>3rdparty</Filter>
+    </ClInclude>
+    <ClInclude Include="renderdoccmd.h" />
+    <ClInclude Include="3rdparty\cmdline\cmdline.h">
       <Filter>3rdparty</Filter>
     </ClInclude>
   </ItemGroup>
@@ -28,7 +34,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\renderdocui\Resources\icon.ico">
+    <None Include="..\qrenderdoc\Resources\icon.ico">
       <Filter>Resources</Filter>
     </None>
   </ItemGroup>

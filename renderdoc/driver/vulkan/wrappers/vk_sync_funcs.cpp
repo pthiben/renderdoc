@@ -1,18 +1,18 @@
 /******************************************************************************
  * The MIT License (MIT)
- * 
- * Copyright (c) 2015-2016 Baldur Karlsson
- * 
+ *
+ * Copyright (c) 2019-2020 Baldur Karlsson
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
  * in the Software without restriction, including without limitation the rights
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -23,6 +23,7 @@
  ******************************************************************************/
 
 #include "../vk_core.h"
+#include "../vk_debug.h"
 
 /*
  * Events and fences need careful handling.
@@ -40,25 +41,25 @@
  * too badly (The replay can be bottlenecked in different ways to the real
  * application, and often has different realtime requirements for the actual
  * frame replay).
- * 
+ *
  * Events are harder because the GPU can wait on them. We need to be particularly
  * careful the GPU never waits on an event that will never become set, or the GPU
  * will lock up.
- * 
+ *
  * For now the implementation is simple, conservative and inefficient. We keep
  * events Set always, never replaying any Reset (CPU or GPU). This means any
  * wait will always succeed on the GPU.
- * 
+ *
  * On the CPU-side with GetEventStatus we do another hard sync with
  * DeviceWaitIdle.
- * 
+ *
  * On the GPU-side, whenever a command buffer contains a CmdWaitEvents we
  * create an event, reset it, and call CmdSetEvent right before the
  * CmdWaitEvents. This should provide the strictest possible ordering guarantee
  * for the CmdWaitEvents (since the event set it was waiting on must have
  * happened at or before where we are setting the event, so our event is as or
  * more conservative than the original event).
- * 
+ *
  * In future it would be nice to save the state of events at the start of
  * the frame and restore them, via GetEventStatus/SetEvent/ResetEvent. However
  * this will not be sufficient to make sure all events are set when they should
@@ -68,781 +69,1160 @@
  * event set. I'm not sure if there's a way around this, we might just have to
  * make slight improvements to the current method by ensuring events are
  * properly hard-synced on the GPU.
- * 
+ *
  */
 
-bool WrappedVulkan::Serialise_vkCreateFence(
-			Serialiser*                                 localSerialiser,
-			VkDevice                                    device,
-			const VkFenceCreateInfo*                    pCreateInfo,
-			const VkAllocationCallbacks*                pAllocator,
-			VkFence*                                    pFence)
+void WrappedVulkan::RemapQueueFamilyIndices(uint32_t &srcQueueFamily, uint32_t &dstQueueFamily)
 {
-	SERIALISE_ELEMENT(ResourceId, devId, GetResID(device));
-	SERIALISE_ELEMENT(VkFenceCreateInfo, info, *pCreateInfo);
-	SERIALISE_ELEMENT(ResourceId, id, GetResID(*pFence));
+  if(srcQueueFamily == VK_QUEUE_FAMILY_EXTERNAL || dstQueueFamily == VK_QUEUE_FAMILY_EXTERNAL ||
+     srcQueueFamily == VK_QUEUE_FAMILY_FOREIGN_EXT || dstQueueFamily == VK_QUEUE_FAMILY_FOREIGN_EXT)
+  {
+    // we should ignore this family transition since we're not synchronising with an
+    // external access.
+    srcQueueFamily = dstQueueFamily = VK_QUEUE_FAMILY_IGNORED;
+  }
+  else
+  {
+    if(srcQueueFamily != VK_QUEUE_FAMILY_IGNORED)
+    {
+      RDCASSERT(srcQueueFamily < ARRAY_COUNT(m_QueueRemapping), srcQueueFamily);
+      srcQueueFamily = m_QueueRemapping[srcQueueFamily][0].family;
+    }
 
-	if(m_State == READING)
-	{
-		device = GetResourceManager()->GetLiveHandle<VkDevice>(devId);
-		VkFence sem = VK_NULL_HANDLE;
-
-		VkResult ret = ObjDisp(device)->CreateFence(Unwrap(device), &info, NULL, &sem);
-
-		if(ret != VK_SUCCESS)
-		{
-			RDCERR("Failed on resource serialise-creation, VkResult: 0x%08x", ret);
-		}
-		else
-		{
-			ResourceId live = GetResourceManager()->WrapResource(Unwrap(device), sem);
-			GetResourceManager()->AddLiveResource(id, sem);
-		}
-	}
-
-	return true;
+    if(dstQueueFamily != VK_QUEUE_FAMILY_IGNORED)
+    {
+      RDCASSERT(dstQueueFamily < ARRAY_COUNT(m_QueueRemapping), dstQueueFamily);
+      dstQueueFamily = m_QueueRemapping[dstQueueFamily][0].family;
+    }
+  }
 }
 
-VkResult WrappedVulkan::vkCreateFence(
-			VkDevice                                device,
-			const VkFenceCreateInfo*                pCreateInfo,
-			const VkAllocationCallbacks*            pAllocator,
-			VkFence*                                pFence)
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkCreateFence(SerialiserType &ser, VkDevice device,
+                                            const VkFenceCreateInfo *pCreateInfo,
+                                            const VkAllocationCallbacks *pAllocator, VkFence *pFence)
 {
-	VkResult ret = ObjDisp(device)->CreateFence(Unwrap(device), pCreateInfo, pAllocator, pFence);
+  SERIALISE_ELEMENT(device);
+  SERIALISE_ELEMENT_LOCAL(CreateInfo, *pCreateInfo);
+  SERIALISE_ELEMENT_OPT(pAllocator);
+  SERIALISE_ELEMENT_LOCAL(Fence, GetResID(*pFence)).TypedAs("VkFence"_lit);
 
-	if(ret == VK_SUCCESS)
-	{
-		ResourceId id = GetResourceManager()->WrapResource(Unwrap(device), *pFence);
-		
-		if(m_State >= WRITING)
-		{
-			Chunk *chunk = NULL;
+  SERIALISE_CHECK_READ_ERRORS();
 
-			{
-				CACHE_THREAD_SERIALISER();
+  if(IsReplayingAndReading())
+  {
+    VkFence fence = VK_NULL_HANDLE;
 
-				SCOPED_SERIALISE_CONTEXT(CREATE_FENCE);
-				Serialise_vkCreateFence(localSerialiser, device, pCreateInfo, NULL, pFence);
+    VkFenceCreateInfo patched = CreateInfo;
 
-				chunk = scope.Get();
-			}
+    byte *tempMem = GetTempMemory(GetNextPatchSize(patched.pNext));
 
-			VkResourceRecord *record = GetResourceManager()->AddResourceRecord(*pFence);
-			record->AddChunk(chunk);
-		}
-		else
-		{
-			GetResourceManager()->AddLiveResource(id, *pFence);
-		}
-	}
+    UnwrapNextChain(m_State, "VkFenceCreateInfo", tempMem, (VkBaseInStructure *)&patched);
 
-	return ret;
+    VkResult ret = ObjDisp(device)->CreateFence(Unwrap(device), &patched, NULL, &fence);
+
+    if(ret != VK_SUCCESS)
+    {
+      RDCERR("Failed on resource serialise-creation, VkResult: %s", ToStr(ret).c_str());
+      return false;
+    }
+    else
+    {
+      ResourceId live = GetResourceManager()->WrapResource(Unwrap(device), fence);
+      GetResourceManager()->AddLiveResource(Fence, fence);
+    }
+
+    AddResource(Fence, ResourceType::Sync, "Fence");
+    DerivedResource(device, Fence);
+  }
+
+  return true;
 }
 
-bool WrappedVulkan::Serialise_vkGetFenceStatus(
-			Serialiser*                                 localSerialiser,
-			VkDevice                                device,
-			VkFence                                 fence)
+VkResult WrappedVulkan::vkCreateFence(VkDevice device, const VkFenceCreateInfo *pCreateInfo,
+                                      const VkAllocationCallbacks *pAllocator, VkFence *pFence)
 {
-	SERIALISE_ELEMENT(ResourceId, id, GetResID(device));
-	SERIALISE_ELEMENT(ResourceId, fid, GetResID(fence));
-	
-	if(m_State < WRITING)
-	{
-		device = GetResourceManager()->GetLiveHandle<VkDevice>(id);
+  VkFenceCreateInfo info = *pCreateInfo;
 
-		ObjDisp(device)->DeviceWaitIdle(Unwrap(device));
-	}
+  byte *tempMem = GetTempMemory(GetNextPatchSize(info.pNext));
 
-	return true;
+  UnwrapNextChain(m_State, "VkFenceCreateInfo", tempMem, (VkBaseInStructure *)&info);
+
+  VkResult ret;
+  SERIALISE_TIME_CALL(ret = ObjDisp(device)->CreateFence(Unwrap(device), &info, pAllocator, pFence));
+
+  if(ret == VK_SUCCESS)
+  {
+    ResourceId id = GetResourceManager()->WrapResource(Unwrap(device), *pFence);
+
+    if(IsCaptureMode(m_State))
+    {
+      Chunk *chunk = NULL;
+
+      {
+        CACHE_THREAD_SERIALISER();
+
+        SCOPED_SERIALISE_CHUNK(VulkanChunk::vkCreateFence);
+        Serialise_vkCreateFence(ser, device, pCreateInfo, NULL, pFence);
+
+        chunk = scope.Get();
+      }
+
+      VkResourceRecord *record = GetResourceManager()->AddResourceRecord(*pFence);
+      record->AddChunk(chunk);
+    }
+    else
+    {
+      GetResourceManager()->AddLiveResource(id, *pFence);
+    }
+  }
+
+  return ret;
 }
 
-VkResult WrappedVulkan::vkGetFenceStatus(
-			VkDevice                                device,
-			VkFence                                 fence)
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkGetFenceStatus(SerialiserType &ser, VkDevice device, VkFence fence)
 {
-	VkResult ret = ObjDisp(device)->GetFenceStatus(Unwrap(device), Unwrap(fence));
-	
-	if(m_State >= WRITING_CAPFRAME)
-	{
-		CACHE_THREAD_SERIALISER();
+  SERIALISE_ELEMENT(device);
+  SERIALISE_ELEMENT(fence);
 
-		SCOPED_SERIALISE_CONTEXT(GET_FENCE_STATUS);
-		Serialise_vkGetFenceStatus(localSerialiser, device, fence);
+  Serialise_DebugMessages(ser);
 
-		m_FrameCaptureRecord->AddChunk(scope.Get());
-	}
+  SERIALISE_CHECK_READ_ERRORS();
 
-	return ret;
+  if(IsReplayingAndReading())
+  {
+    ObjDisp(device)->DeviceWaitIdle(Unwrap(device));
+  }
+
+  return true;
 }
 
-bool WrappedVulkan::Serialise_vkResetFences(
-			Serialiser*                             localSerialiser,
-			VkDevice                                device,
-			uint32_t                                fenceCount,
-			const VkFence*                          pFences)
+VkResult WrappedVulkan::vkGetFenceStatus(VkDevice device, VkFence fence)
 {
-	SERIALISE_ELEMENT(ResourceId, id, GetResID(device));
-	SERIALISE_ELEMENT(uint32_t, count, fenceCount);
-	
-	vector<VkFence> fences;
+  SCOPED_DBG_SINK();
 
-	for(uint32_t i=0; i < count; i++)
-	{
-		ResourceId id;
-		if(m_State >= WRITING)
-			id = GetResID(pFences[i]);
+  VkResult ret;
+  SERIALISE_TIME_CALL(ret = ObjDisp(device)->GetFenceStatus(Unwrap(device), Unwrap(fence)));
 
-		localSerialiser->Serialise("pFences[]", id);
-		
-		if(m_State < WRITING && GetResourceManager()->HasLiveResource(id))
-			fences.push_back(Unwrap(GetResourceManager()->GetLiveHandle<VkFence>(id)));
-	}
+  if(IsActiveCapturing(m_State))
+  {
+    bool alreadySerialised = false;
 
-	if(m_State < WRITING)
-	{
-		// we don't care about fence states ourselves as we cannot record them perfectly and just
-		// do full waitidle flushes. However if the fence is passed to vkQueueSubmit we need to
-		// make sure it is correctly unsignalled.
-		
-		device = GetResourceManager()->GetLiveHandle<VkDevice>(id);
+    {
+      m_FrameCaptureRecord->LockChunks();
+      alreadySerialised = (m_FrameCaptureRecord->NumChunks() > 0 &&
+                           m_FrameCaptureRecord->GetLastChunk()->GetChunkType<VulkanChunk>() ==
+                               VulkanChunk::vkGetFenceStatus);
+      m_FrameCaptureRecord->UnlockChunks();
+    }
 
-		ObjDisp(device)->ResetFences(Unwrap(device), (uint32_t)fences.size(), &fences[0]);
-	}
+    if(!alreadySerialised)
+    {
+      CACHE_THREAD_SERIALISER();
 
-	return true;
+      SCOPED_SERIALISE_CHUNK(VulkanChunk::vkGetFenceStatus);
+      Serialise_vkGetFenceStatus(ser, device, fence);
+
+      m_FrameCaptureRecord->AddChunk(scope.Get());
+      GetResourceManager()->MarkResourceFrameReferenced(GetResID(fence), eFrameRef_Read);
+    }
+  }
+
+  return ret;
 }
 
-VkResult WrappedVulkan::vkResetFences(
-			VkDevice                                    device,
-			uint32_t                                    fenceCount,
-			const VkFence*                              pFences)
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkResetFences(SerialiserType &ser, VkDevice device,
+                                            uint32_t fenceCount, const VkFence *pFences)
 {
-	VkFence *unwrapped = GetTempArray<VkFence>(fenceCount);
-	for(uint32_t i=0; i < fenceCount; i++) unwrapped[i] = Unwrap(pFences[i]);
-	VkResult ret = ObjDisp(device)->ResetFences(Unwrap(device), fenceCount, unwrapped);
-	
-	if(m_State >= WRITING_CAPFRAME)
-	{
-		CACHE_THREAD_SERIALISER();
+  SERIALISE_ELEMENT(device);
+  SERIALISE_ELEMENT(fenceCount);
+  SERIALISE_ELEMENT_ARRAY(pFences, fenceCount);
 
-		SCOPED_SERIALISE_CONTEXT(RESET_FENCE);
-		Serialise_vkResetFences(localSerialiser, device, fenceCount, pFences);
+  Serialise_DebugMessages(ser);
 
-		m_FrameCaptureRecord->AddChunk(scope.Get());
-	}
+  SERIALISE_CHECK_READ_ERRORS();
 
-	return ret;
+  if(IsReplayingAndReading())
+  {
+    // we don't care about fence states ourselves as we cannot record them perfectly and just
+    // do full waitidle flushes.
+
+    // since we don't have anything signalling or waiting on fences, don't bother to reset them
+    // either.
+    // ObjDisp(device)->ResetFences(Unwrap(device), fenceCount, pFences);
+  }
+
+  return true;
 }
 
-bool WrappedVulkan::Serialise_vkWaitForFences(
-			Serialiser*                             localSerialiser,
-			VkDevice                                device,
-			uint32_t                                fenceCount,
-			const VkFence*                          pFences,
-			VkBool32                                waitAll,
-			uint64_t                                timeout)
+VkResult WrappedVulkan::vkResetFences(VkDevice device, uint32_t fenceCount, const VkFence *pFences)
 {
-	SERIALISE_ELEMENT(ResourceId, id, GetResID(device));
-	SERIALISE_ELEMENT(VkBool32, wait, waitAll);
-	SERIALISE_ELEMENT(uint64_t, tmout, timeout);
-	SERIALISE_ELEMENT(uint32_t, count, fenceCount);
-	
-	vector<VkFence> fences;
+  SCOPED_DBG_SINK();
 
-	for(uint32_t i=0; i < count; i++)
-	{
-		ResourceId id;
-		if(m_State >= WRITING)
-			id = GetResID(pFences[i]);
+  VkResult ret;
+  SERIALISE_TIME_CALL(ret = ObjDisp(device)->ResetFences(Unwrap(device), fenceCount,
+                                                         UnwrapArray(pFences, fenceCount)));
 
-		localSerialiser->Serialise("pFences[]", id);
+  if(IsActiveCapturing(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
 
-		if(m_State < WRITING && GetResourceManager()->HasLiveResource(id))
-			fences.push_back(Unwrap(GetResourceManager()->GetLiveHandle<VkFence>(id)));
-	}
+    SCOPED_SERIALISE_CHUNK(VulkanChunk::vkResetFences);
+    Serialise_vkResetFences(ser, device, fenceCount, pFences);
 
-	if(m_State < WRITING)
-	{
-		device = GetResourceManager()->GetLiveHandle<VkDevice>(id);
+    m_FrameCaptureRecord->AddChunk(scope.Get());
+    for(uint32_t i = 0; i < fenceCount; i++)
+      GetResourceManager()->MarkResourceFrameReferenced(GetResID(pFences[i]), eFrameRef_Read);
+  }
 
-		ObjDisp(device)->DeviceWaitIdle(Unwrap(device));
-	}
-
-	return true;
+  return ret;
 }
 
-VkResult WrappedVulkan::vkWaitForFences(
-			VkDevice                                device,
-			uint32_t                                fenceCount,
-			const VkFence*                          pFences,
-			VkBool32                                waitAll,
-			uint64_t                                timeout)
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkWaitForFences(SerialiserType &ser, VkDevice device,
+                                              uint32_t fenceCount, const VkFence *pFences,
+                                              VkBool32 waitAll, uint64_t timeout)
 {
-	VkFence *unwrapped = GetTempArray<VkFence>(fenceCount);
-	for (uint32_t i = 0; i < fenceCount; i++) unwrapped[i] = Unwrap(pFences[i]);
-	VkResult ret = ObjDisp(device)->WaitForFences(Unwrap(device), fenceCount, unwrapped, waitAll, timeout);
-	
-	if(m_State >= WRITING_CAPFRAME)
-	{
-		CACHE_THREAD_SERIALISER();
+  SERIALISE_ELEMENT(device);
+  SERIALISE_ELEMENT(fenceCount);
+  SERIALISE_ELEMENT_ARRAY(pFences, fenceCount);
+  SERIALISE_ELEMENT(waitAll);
+  SERIALISE_ELEMENT(timeout);
 
-		SCOPED_SERIALISE_CONTEXT(WAIT_FENCES);
-		Serialise_vkWaitForFences(localSerialiser, device, fenceCount, pFences, waitAll, timeout);
+  Serialise_DebugMessages(ser);
 
-		m_FrameCaptureRecord->AddChunk(scope.Get());
-	}
+  SERIALISE_CHECK_READ_ERRORS();
 
-	return ret;
+  if(IsReplayingAndReading())
+  {
+    ObjDisp(device)->DeviceWaitIdle(Unwrap(device));
+  }
+
+  return true;
 }
 
-bool WrappedVulkan::Serialise_vkCreateEvent(
-			Serialiser*                             localSerialiser,
-			VkDevice                                device,
-			const VkEventCreateInfo*                pCreateInfo,
-			const VkAllocationCallbacks*            pAllocator,
-			VkEvent*                                pEvent)
+VkResult WrappedVulkan::vkWaitForFences(VkDevice device, uint32_t fenceCount,
+                                        const VkFence *pFences, VkBool32 waitAll, uint64_t timeout)
 {
-	SERIALISE_ELEMENT(ResourceId, devId, GetResID(device));
-	SERIALISE_ELEMENT(VkEventCreateInfo, info, *pCreateInfo);
-	SERIALISE_ELEMENT(ResourceId, id, GetResID(*pEvent));
+  SCOPED_DBG_SINK();
 
-	if(m_State == READING)
-	{
-		device = GetResourceManager()->GetLiveHandle<VkDevice>(devId);
-		VkEvent ev = VK_NULL_HANDLE;
+  VkResult ret;
+  SERIALISE_TIME_CALL(ret = ObjDisp(device)->WaitForFences(Unwrap(device), fenceCount,
+                                                           UnwrapArray(pFences, fenceCount),
+                                                           waitAll, timeout));
 
-		VkResult ret = ObjDisp(device)->CreateEvent(Unwrap(device), &info, NULL, &ev);
+  if(IsActiveCapturing(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
 
-		// see top of this file for current event/fence handling
-		ObjDisp(device)->SetEvent(Unwrap(device), ev);
+    SCOPED_SERIALISE_CHUNK(VulkanChunk::vkWaitForFences);
+    Serialise_vkWaitForFences(ser, device, fenceCount, pFences, waitAll, timeout);
 
-		if(ret != VK_SUCCESS)
-		{
-			RDCERR("Failed on resource serialise-creation, VkResult: 0x%08x", ret);
-		}
-		else
-		{
-			ResourceId live = GetResourceManager()->WrapResource(Unwrap(device), ev);
-			GetResourceManager()->AddLiveResource(id, ev);
-		}
-	}
+    m_FrameCaptureRecord->AddChunk(scope.Get());
+    for(uint32_t i = 0; i < fenceCount; i++)
+      GetResourceManager()->MarkResourceFrameReferenced(GetResID(pFences[i]), eFrameRef_Read);
+  }
 
-	return true;
+  return ret;
 }
 
-VkResult WrappedVulkan::vkCreateEvent(
-			VkDevice                                device,
-			const VkEventCreateInfo*                pCreateInfo,
-			const VkAllocationCallbacks*            pAllocator,
-			VkEvent*                                pEvent)
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkCreateEvent(SerialiserType &ser, VkDevice device,
+                                            const VkEventCreateInfo *pCreateInfo,
+                                            const VkAllocationCallbacks *pAllocator, VkEvent *pEvent)
 {
-	VkResult ret = ObjDisp(device)->CreateEvent(Unwrap(device), pCreateInfo, pAllocator, pEvent);
+  SERIALISE_ELEMENT(device);
+  SERIALISE_ELEMENT_LOCAL(CreateInfo, *pCreateInfo);
+  SERIALISE_ELEMENT_OPT(pAllocator);
+  SERIALISE_ELEMENT_LOCAL(Event, GetResID(*pEvent)).TypedAs("VkEvent"_lit);
 
-	if(ret == VK_SUCCESS)
-	{
-		ResourceId id = GetResourceManager()->WrapResource(Unwrap(device), *pEvent);
-		
-		if(m_State >= WRITING)
-		{
-			Chunk *chunk = NULL;
+  SERIALISE_CHECK_READ_ERRORS();
 
-			{
-				CACHE_THREAD_SERIALISER();
+  if(IsReplayingAndReading())
+  {
+    VkEvent ev = VK_NULL_HANDLE;
 
-				SCOPED_SERIALISE_CONTEXT(CREATE_EVENT);
-				Serialise_vkCreateEvent(localSerialiser, device, pCreateInfo, NULL, pEvent);
+    VkResult ret = ObjDisp(device)->CreateEvent(Unwrap(device), &CreateInfo, NULL, &ev);
 
-				chunk = scope.Get();
-			}
+    // see top of this file for current event/fence handling
+    ObjDisp(device)->SetEvent(Unwrap(device), ev);
 
-			VkResourceRecord *record = GetResourceManager()->AddResourceRecord(*pEvent);
-			record->AddChunk(chunk);
-		}
-		else
-		{
-			GetResourceManager()->AddLiveResource(id, *pEvent);
-		}
-	}
+    if(ret != VK_SUCCESS)
+    {
+      RDCERR("Failed on resource serialise-creation, VkResult: %s", ToStr(ret).c_str());
+      return false;
+    }
+    else
+    {
+      ResourceId live = GetResourceManager()->WrapResource(Unwrap(device), ev);
+      GetResourceManager()->AddLiveResource(Event, ev);
+    }
 
-	return ret;
+    AddResource(Event, ResourceType::Sync, "Event");
+    DerivedResource(device, Event);
+  }
+
+  return true;
 }
 
-bool WrappedVulkan::Serialise_vkSetEvent(
-	Serialiser*                                 localSerialiser,
-	VkDevice                                    device,
-	VkEvent                                     event)
+VkResult WrappedVulkan::vkCreateEvent(VkDevice device, const VkEventCreateInfo *pCreateInfo,
+                                      const VkAllocationCallbacks *pAllocator, VkEvent *pEvent)
 {
-	SERIALISE_ELEMENT(ResourceId, id, GetResID(device));
-	SERIALISE_ELEMENT(ResourceId, eid, GetResID(event));
-	
-	if(m_State < WRITING)
-	{
-		// see top of this file for current event/fence handling
-	}
+  VkResult ret;
+  SERIALISE_TIME_CALL(
+      ret = ObjDisp(device)->CreateEvent(Unwrap(device), pCreateInfo, pAllocator, pEvent));
 
-	return true;
+  if(ret == VK_SUCCESS)
+  {
+    ResourceId id = GetResourceManager()->WrapResource(Unwrap(device), *pEvent);
+
+    if(IsCaptureMode(m_State))
+    {
+      Chunk *chunk = NULL;
+
+      {
+        CACHE_THREAD_SERIALISER();
+
+        SCOPED_SERIALISE_CHUNK(VulkanChunk::vkCreateEvent);
+        Serialise_vkCreateEvent(ser, device, pCreateInfo, NULL, pEvent);
+
+        chunk = scope.Get();
+      }
+
+      VkResourceRecord *record = GetResourceManager()->AddResourceRecord(*pEvent);
+      record->AddChunk(chunk);
+    }
+    else
+    {
+      GetResourceManager()->AddLiveResource(id, *pEvent);
+    }
+  }
+
+  return ret;
 }
 
-VkResult WrappedVulkan::vkSetEvent(
-	VkDevice                                    device,
-	VkEvent                                     event)
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkSetEvent(SerialiserType &ser, VkDevice device, VkEvent event)
 {
-	VkResult ret = ObjDisp(device)->SetEvent(Unwrap(device), Unwrap(event));
-	
-	if(m_State >= WRITING_CAPFRAME)
-	{
-		CACHE_THREAD_SERIALISER();
+  SERIALISE_ELEMENT(device);
+  SERIALISE_ELEMENT(event);
 
-		SCOPED_SERIALISE_CONTEXT(SET_EVENT);
-		Serialise_vkSetEvent(localSerialiser, device, event);
+  Serialise_DebugMessages(ser);
 
-		m_FrameCaptureRecord->AddChunk(scope.Get());
-	}
+  SERIALISE_CHECK_READ_ERRORS();
 
-	return ret;
+  if(IsReplayingAndReading())
+  {
+    // see top of this file for current event/fence handling
+  }
+
+  return true;
 }
 
-bool WrappedVulkan::Serialise_vkResetEvent(
-	Serialiser*                                 localSerialiser,
-	VkDevice                                    device,
-	VkEvent                                     event)
+VkResult WrappedVulkan::vkSetEvent(VkDevice device, VkEvent event)
 {
-	SERIALISE_ELEMENT(ResourceId, id, GetResID(device));
-	SERIALISE_ELEMENT(ResourceId, eid, GetResID(event));
-	
-	if(m_State < WRITING)
-	{
-		// see top of this file for current event/fence handling
-	}
+  SCOPED_DBG_SINK();
 
-	return true;
+  VkResult ret;
+  SERIALISE_TIME_CALL(ret = ObjDisp(device)->SetEvent(Unwrap(device), Unwrap(event)));
+
+  if(IsActiveCapturing(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+
+    SCOPED_SERIALISE_CHUNK(VulkanChunk::vkSetEvent);
+    Serialise_vkSetEvent(ser, device, event);
+
+    m_FrameCaptureRecord->AddChunk(scope.Get());
+  }
+
+  return ret;
 }
 
-VkResult WrappedVulkan::vkResetEvent(
-	VkDevice                                    device,
-	VkEvent                                     event)
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkResetEvent(SerialiserType &ser, VkDevice device, VkEvent event)
 {
-	VkResult ret = ObjDisp(device)->ResetEvent(Unwrap(device), Unwrap(event));
-	
-	if(m_State >= WRITING_CAPFRAME)
-	{
-		CACHE_THREAD_SERIALISER();
+  SERIALISE_ELEMENT(device);
+  SERIALISE_ELEMENT(event);
 
-		SCOPED_SERIALISE_CONTEXT(RESET_EVENT);
-		Serialise_vkResetEvent(localSerialiser, device, event);
+  Serialise_DebugMessages(ser);
 
-		m_FrameCaptureRecord->AddChunk(scope.Get());
-	}
+  SERIALISE_CHECK_READ_ERRORS();
 
-	return ret;
+  if(IsReplayingAndReading())
+  {
+    // see top of this file for current event/fence handling
+  }
+
+  return true;
 }
 
-bool WrappedVulkan::Serialise_vkGetEventStatus(
-			Serialiser*                             localSerialiser,
-			VkDevice                                device,
-			VkEvent                                 event)
+VkResult WrappedVulkan::vkResetEvent(VkDevice device, VkEvent event)
 {
-	SERIALISE_ELEMENT(ResourceId, id, GetResID(device));
-	SERIALISE_ELEMENT(ResourceId, eid, GetResID(event));
-	
-	if(m_State < WRITING)
-	{
-		device = GetResourceManager()->GetLiveHandle<VkDevice>(id);
+  SCOPED_DBG_SINK();
 
-		ObjDisp(device)->DeviceWaitIdle(Unwrap(device));
-	}
+  VkResult ret;
+  SERIALISE_TIME_CALL(ret = ObjDisp(device)->ResetEvent(Unwrap(device), Unwrap(event)));
 
-	return true;
+  if(IsActiveCapturing(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+
+    SCOPED_SERIALISE_CHUNK(VulkanChunk::vkResetEvent);
+    Serialise_vkResetEvent(ser, device, event);
+
+    m_FrameCaptureRecord->AddChunk(scope.Get());
+  }
+
+  return ret;
 }
 
-VkResult WrappedVulkan::vkGetEventStatus(
-			VkDevice                                device,
-			VkEvent                                 event)
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkGetEventStatus(SerialiserType &ser, VkDevice device, VkEvent event)
 {
-	VkResult ret = ObjDisp(device)->GetEventStatus(Unwrap(device), Unwrap(event));
-	
-	if(m_State >= WRITING_CAPFRAME)
-	{
-		CACHE_THREAD_SERIALISER();
+  SERIALISE_ELEMENT(device);
+  SERIALISE_ELEMENT(event);
 
-		SCOPED_SERIALISE_CONTEXT(GET_EVENT_STATUS);
-		Serialise_vkGetEventStatus(localSerialiser, device, event);
+  Serialise_DebugMessages(ser);
 
-		m_FrameCaptureRecord->AddChunk(scope.Get());
-	}
+  SERIALISE_CHECK_READ_ERRORS();
 
-	return ret;
+  if(IsReplayingAndReading())
+  {
+    ObjDisp(device)->DeviceWaitIdle(Unwrap(device));
+  }
+
+  return true;
 }
 
-bool WrappedVulkan::Serialise_vkCreateSemaphore(
-			Serialiser*                                 localSerialiser,
-			VkDevice                                    device,
-			const VkSemaphoreCreateInfo*                pCreateInfo,
-			const VkAllocationCallbacks*                pAllocator,
-			VkSemaphore*                                pSemaphore)
+VkResult WrappedVulkan::vkGetEventStatus(VkDevice device, VkEvent event)
 {
-	SERIALISE_ELEMENT(ResourceId, devId, GetResID(device));
-	SERIALISE_ELEMENT(VkSemaphoreCreateInfo, info, *pCreateInfo);
-	SERIALISE_ELEMENT(ResourceId, id, GetResID(*pSemaphore));
+  SCOPED_DBG_SINK();
 
-	if(m_State == READING)
-	{
-		device = GetResourceManager()->GetLiveHandle<VkDevice>(devId);
-		VkSemaphore sem = VK_NULL_HANDLE;
+  VkResult ret;
+  SERIALISE_TIME_CALL(ret = ObjDisp(device)->GetEventStatus(Unwrap(device), Unwrap(event)));
 
-		VkResult ret = ObjDisp(device)->CreateSemaphore(Unwrap(device), &info, NULL, &sem);
+  if(IsActiveCapturing(m_State))
+  {
+    bool alreadySerialised = false;
 
-		if(ret != VK_SUCCESS)
-		{
-			RDCERR("Failed on resource serialise-creation, VkResult: 0x%08x", ret);
-		}
-		else
-		{
-			ResourceId live = GetResourceManager()->WrapResource(Unwrap(device), sem);
-			GetResourceManager()->AddLiveResource(id, sem);
-		}
-	}
+    {
+      m_FrameCaptureRecord->LockChunks();
+      alreadySerialised = (m_FrameCaptureRecord->NumChunks() > 0 &&
+                           m_FrameCaptureRecord->GetLastChunk()->GetChunkType<VulkanChunk>() ==
+                               VulkanChunk::vkGetEventStatus);
+      m_FrameCaptureRecord->UnlockChunks();
+    }
 
-	return true;
+    if(!alreadySerialised)
+    {
+      CACHE_THREAD_SERIALISER();
+
+      SCOPED_SERIALISE_CHUNK(VulkanChunk::vkGetEventStatus);
+      Serialise_vkGetEventStatus(ser, device, event);
+
+      m_FrameCaptureRecord->AddChunk(scope.Get());
+    }
+  }
+
+  return ret;
 }
 
-VkResult WrappedVulkan::vkCreateSemaphore(
-			VkDevice                                    device,
-			const VkSemaphoreCreateInfo*                pCreateInfo,
-			const VkAllocationCallbacks*                pAllocator,
-			VkSemaphore*                                pSemaphore)
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkCreateSemaphore(SerialiserType &ser, VkDevice device,
+                                                const VkSemaphoreCreateInfo *pCreateInfo,
+                                                const VkAllocationCallbacks *pAllocator,
+                                                VkSemaphore *pSemaphore)
 {
-	VkResult ret = ObjDisp(device)->CreateSemaphore(Unwrap(device), pCreateInfo, pAllocator, pSemaphore);
+  SERIALISE_ELEMENT(device);
+  SERIALISE_ELEMENT_LOCAL(CreateInfo, *pCreateInfo);
+  SERIALISE_ELEMENT_OPT(pAllocator);
+  SERIALISE_ELEMENT_LOCAL(Semaphore, GetResID(*pSemaphore)).TypedAs("VkSemaphore"_lit);
 
-	if(ret == VK_SUCCESS)
-	{
-		ResourceId id = GetResourceManager()->WrapResource(Unwrap(device), *pSemaphore);
+  SERIALISE_CHECK_READ_ERRORS();
 
-		if(m_State >= WRITING)
-		{
-			Chunk *chunk = NULL;
+  if(IsReplayingAndReading())
+  {
+    VkSemaphore sem = VK_NULL_HANDLE;
 
-			{
-				CACHE_THREAD_SERIALISER();
+    VkSemaphoreCreateInfo patched = CreateInfo;
 
-				SCOPED_SERIALISE_CONTEXT(CREATE_SEMAPHORE);
-				Serialise_vkCreateSemaphore(localSerialiser, device, pCreateInfo, NULL, pSemaphore);
+    byte *tempMem = GetTempMemory(GetNextPatchSize(patched.pNext));
 
-				chunk = scope.Get();
-			}
+    UnwrapNextChain(m_State, "VkSemaphoreCreateInfo", tempMem, (VkBaseInStructure *)&patched);
 
-			VkResourceRecord *record = GetResourceManager()->AddResourceRecord(*pSemaphore);
-			record->AddChunk(chunk);
-		}
-		else
-		{
-			GetResourceManager()->AddLiveResource(id, *pSemaphore);
-		}
-	}
+    VkResult ret = ObjDisp(device)->CreateSemaphore(Unwrap(device), &patched, NULL, &sem);
 
-	return ret;
+    if(ret != VK_SUCCESS)
+    {
+      RDCERR("Failed on resource serialise-creation, VkResult: %s", ToStr(ret).c_str());
+      return false;
+    }
+    else
+    {
+      ResourceId live;
+
+      if(GetResourceManager()->HasWrapper(ToTypedHandle(sem)))
+      {
+        live = GetResourceManager()->GetNonDispWrapper(sem)->id;
+
+        RDCWARN(
+            "On replay, semaphore got a duplicate handle - maybe a bug, or it could be an "
+            "indication of an implementation that doesn't use semaphores");
+
+        // destroy this instance of the duplicate, as we must have matching create/destroy
+        // calls and there won't be a wrapped resource hanging around to destroy this one.
+        ObjDisp(device)->DestroySemaphore(Unwrap(device), sem, NULL);
+
+        // whenever the new ID is requested, return the old ID, via replacements.
+        GetResourceManager()->ReplaceResource(Semaphore, GetResourceManager()->GetOriginalID(live));
+      }
+      else
+      {
+        live = GetResourceManager()->WrapResource(Unwrap(device), sem);
+        GetResourceManager()->AddLiveResource(Semaphore, sem);
+      }
+    }
+
+    AddResource(Semaphore, ResourceType::Sync, "Semaphore");
+    DerivedResource(device, Semaphore);
+  }
+
+  return true;
 }
 
-
-bool WrappedVulkan::Serialise_vkCmdSetEvent(
-		Serialiser*                                 localSerialiser,
-		VkCommandBuffer                                 cmdBuffer,
-    VkEvent                                     event,
-		VkPipelineStageFlags                        stageMask)
+VkResult WrappedVulkan::vkCreateSemaphore(VkDevice device, const VkSemaphoreCreateInfo *pCreateInfo,
+                                          const VkAllocationCallbacks *pAllocator,
+                                          VkSemaphore *pSemaphore)
 {
-	SERIALISE_ELEMENT(ResourceId, cmdid, GetResID(cmdBuffer));
-	SERIALISE_ELEMENT(ResourceId, eid, GetResID(event));
-	SERIALISE_ELEMENT(VkPipelineStageFlagBits, mask, (VkPipelineStageFlagBits)stageMask);
+  VkSemaphoreCreateInfo info = *pCreateInfo;
 
-	if(m_State < WRITING)
-		m_LastCmdBufferID = cmdid;
+  byte *tempMem = GetTempMemory(GetNextPatchSize(info.pNext));
 
-	// see top of this file for current event/fence handling
-	
-	if(m_State == EXECUTING)
-	{
-		event = GetResourceManager()->GetLiveHandle<VkEvent>(eid);
-		
-		if(ShouldRerecordCmd(cmdid) && InRerecordRange())
-		{
-			cmdBuffer = RerecordCmdBuf(cmdid);
-			ObjDisp(cmdBuffer)->CmdSetEvent(Unwrap(cmdBuffer), Unwrap(event), mask);
-		}
-	}
-	else if(m_State == READING)
-	{
-		cmdBuffer = GetResourceManager()->GetLiveHandle<VkCommandBuffer>(cmdid);
-		event = GetResourceManager()->GetLiveHandle<VkEvent>(eid);
-		
-		ObjDisp(cmdBuffer)->CmdSetEvent(Unwrap(cmdBuffer), Unwrap(event), mask);
-	}
+  UnwrapNextChain(m_State, "VkSemaphoreCreateInfo", tempMem, (VkBaseInStructure *)&info);
 
-	return true;
+  VkResult ret;
+  SERIALISE_TIME_CALL(
+      ret = ObjDisp(device)->CreateSemaphore(Unwrap(device), &info, pAllocator, pSemaphore));
+
+  if(ret == VK_SUCCESS)
+  {
+    ResourceId id = GetResourceManager()->WrapResource(Unwrap(device), *pSemaphore);
+
+    if(IsCaptureMode(m_State))
+    {
+      Chunk *chunk = NULL;
+
+      {
+        CACHE_THREAD_SERIALISER();
+
+        SCOPED_SERIALISE_CHUNK(VulkanChunk::vkCreateSemaphore);
+        Serialise_vkCreateSemaphore(ser, device, pCreateInfo, NULL, pSemaphore);
+
+        chunk = scope.Get();
+      }
+
+      VkResourceRecord *record = GetResourceManager()->AddResourceRecord(*pSemaphore);
+      record->AddChunk(chunk);
+    }
+    else
+    {
+      GetResourceManager()->AddLiveResource(id, *pSemaphore);
+    }
+  }
+
+  return ret;
 }
 
-void WrappedVulkan::vkCmdSetEvent(
-    VkCommandBuffer                                 cmdBuffer,
-    VkEvent                                     event,
-		VkPipelineStageFlags                        stageMask)
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkCmdSetEvent(SerialiserType &ser, VkCommandBuffer commandBuffer,
+                                            VkEvent event, VkPipelineStageFlags stageMask)
 {
-	ObjDisp(cmdBuffer)->CmdSetEvent(Unwrap(cmdBuffer), Unwrap(event), stageMask);
+  SERIALISE_ELEMENT(commandBuffer);
+  SERIALISE_ELEMENT(event);
+  SERIALISE_ELEMENT_TYPED(VkPipelineStageFlagBits, stageMask).TypedAs("VkPipelineStageFlags"_lit);
 
-	if(m_State >= WRITING)
-	{
-		VkResourceRecord *record = GetRecord(cmdBuffer);
+  Serialise_DebugMessages(ser);
 
-		CACHE_THREAD_SERIALISER();
+  SERIALISE_CHECK_READ_ERRORS();
 
-		SCOPED_SERIALISE_CONTEXT(CMD_SET_EVENT);
-		Serialise_vkCmdSetEvent(localSerialiser, cmdBuffer, event, stageMask);
+  if(IsReplayingAndReading())
+  {
+    m_LastCmdBufferID = GetResourceManager()->GetOriginalID(GetResID(commandBuffer));
 
-		record->AddChunk(scope.Get());
-		record->MarkResourceFrameReferenced(GetResID(event), eFrameRef_Read);
-	}
+    // see top of this file for current event/fence handling
+
+    if(IsActiveReplaying(m_State))
+    {
+      if(InRerecordRange(m_LastCmdBufferID))
+        commandBuffer = RerecordCmdBuf(m_LastCmdBufferID);
+      else
+        commandBuffer = VK_NULL_HANDLE;
+    }
+
+    if(commandBuffer != VK_NULL_HANDLE)
+      ObjDisp(commandBuffer)->CmdSetEvent(Unwrap(commandBuffer), Unwrap(event), stageMask);
+  }
+
+  return true;
 }
 
-bool WrappedVulkan::Serialise_vkCmdResetEvent(
-		Serialiser*                                 localSerialiser,
-		VkCommandBuffer                                 cmdBuffer,
-    VkEvent                                     event,
-		VkPipelineStageFlags                        stageMask)
+void WrappedVulkan::vkCmdSetEvent(VkCommandBuffer commandBuffer, VkEvent event,
+                                  VkPipelineStageFlags stageMask)
 {
-	SERIALISE_ELEMENT(ResourceId, cmdid, GetResID(cmdBuffer));
-	SERIALISE_ELEMENT(ResourceId, eid, GetResID(event));
-	SERIALISE_ELEMENT(VkPipelineStageFlagBits, mask, (VkPipelineStageFlagBits)stageMask);
+  SCOPED_DBG_SINK();
 
-	if(m_State < WRITING)
-		m_LastCmdBufferID = cmdid;
-	
-	// see top of this file for current event/fence handling
+  SERIALISE_TIME_CALL(
+      ObjDisp(commandBuffer)->CmdSetEvent(Unwrap(commandBuffer), Unwrap(event), stageMask));
 
-	if(m_State == EXECUTING)
-	{
-		event = GetResourceManager()->GetLiveHandle<VkEvent>(eid);
+  if(IsCaptureMode(m_State))
+  {
+    VkResourceRecord *record = GetRecord(commandBuffer);
 
-		if(ShouldRerecordCmd(cmdid) && InRerecordRange())
-		{
-			cmdBuffer = RerecordCmdBuf(cmdid);
-			//ObjDisp(cmdBuffer)->CmdResetEvent(Unwrap(cmdBuffer), Unwrap(event), mask);
-		}
-	}
-	else if(m_State == READING)
-	{
-		cmdBuffer = GetResourceManager()->GetLiveHandle<VkCommandBuffer>(cmdid);
-		event = GetResourceManager()->GetLiveHandle<VkEvent>(eid);
-		
-		//ObjDisp(cmdBuffer)->CmdResetEvent(Unwrap(cmdBuffer), Unwrap(event), mask);
-	}
+    CACHE_THREAD_SERIALISER();
 
-	return true;
+    SCOPED_SERIALISE_CHUNK(VulkanChunk::vkCmdSetEvent);
+    Serialise_vkCmdSetEvent(ser, commandBuffer, event, stageMask);
+
+    record->AddChunk(scope.Get(record->cmdInfo->alloc));
+    record->MarkResourceFrameReferenced(GetResID(event), eFrameRef_Read);
+  }
 }
 
-void WrappedVulkan::vkCmdResetEvent(
-    VkCommandBuffer                                 cmdBuffer,
-    VkEvent                                     event,
-		VkPipelineStageFlags                        stageMask)
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkCmdResetEvent(SerialiserType &ser, VkCommandBuffer commandBuffer,
+                                              VkEvent event, VkPipelineStageFlags stageMask)
 {
-	ObjDisp(cmdBuffer)->CmdResetEvent(Unwrap(cmdBuffer), Unwrap(event), stageMask);
+  SERIALISE_ELEMENT(commandBuffer);
+  SERIALISE_ELEMENT(event);
+  SERIALISE_ELEMENT_TYPED(VkPipelineStageFlagBits, stageMask).TypedAs("VkPipelineStageFlags"_lit);
 
-	if(m_State >= WRITING)
-	{
-		VkResourceRecord *record = GetRecord(cmdBuffer);
+  Serialise_DebugMessages(ser);
 
-		CACHE_THREAD_SERIALISER();
+  SERIALISE_CHECK_READ_ERRORS();
 
-		SCOPED_SERIALISE_CONTEXT(CMD_RESET_EVENT);
-		Serialise_vkCmdResetEvent(localSerialiser, cmdBuffer, event, stageMask);
+  if(IsReplayingAndReading())
+  {
+    m_LastCmdBufferID = GetResourceManager()->GetOriginalID(GetResID(commandBuffer));
 
-		record->AddChunk(scope.Get());
-		record->MarkResourceFrameReferenced(GetResID(event), eFrameRef_Read);
-	}
+    // see top of this file for current event/fence handling
+
+    if(IsActiveReplaying(m_State))
+    {
+      if(InRerecordRange(m_LastCmdBufferID))
+        commandBuffer = RerecordCmdBuf(m_LastCmdBufferID);
+      else
+        commandBuffer = VK_NULL_HANDLE;
+    }
+
+    if(commandBuffer != VK_NULL_HANDLE)
+    {
+      // ObjDisp(commandBuffer)->CmdResetEvent(Unwrap(commandBuffer), Unwrap(event), mask);
+    }
+  }
+
+  return true;
 }
 
+void WrappedVulkan::vkCmdResetEvent(VkCommandBuffer commandBuffer, VkEvent event,
+                                    VkPipelineStageFlags stageMask)
+{
+  SCOPED_DBG_SINK();
+
+  SERIALISE_TIME_CALL(
+      ObjDisp(commandBuffer)->CmdResetEvent(Unwrap(commandBuffer), Unwrap(event), stageMask));
+
+  if(IsCaptureMode(m_State))
+  {
+    VkResourceRecord *record = GetRecord(commandBuffer);
+
+    CACHE_THREAD_SERIALISER();
+
+    SCOPED_SERIALISE_CHUNK(VulkanChunk::vkCmdResetEvent);
+    Serialise_vkCmdResetEvent(ser, commandBuffer, event, stageMask);
+
+    record->AddChunk(scope.Get(record->cmdInfo->alloc));
+    record->MarkResourceFrameReferenced(GetResID(event), eFrameRef_Read);
+  }
+}
+
+template <typename SerialiserType>
 bool WrappedVulkan::Serialise_vkCmdWaitEvents(
-			Serialiser*                                 localSerialiser,
-			VkCommandBuffer                             cmdBuffer,
-			uint32_t                                    eventCount,
-			const VkEvent*                              pEvents,
-			VkPipelineStageFlags                        srcStageMask,
-			VkPipelineStageFlags                        dstStageMask,
-			uint32_t                                    memoryBarrierCount,
-			const VkMemoryBarrier*                      pMemoryBarriers,
-			uint32_t                                    bufferMemoryBarrierCount,
-			const VkBufferMemoryBarrier*                pBufferMemoryBarriers,
-			uint32_t                                    imageMemoryBarrierCount,
-			const VkImageMemoryBarrier*                 pImageMemoryBarriers)
+    SerialiserType &ser, VkCommandBuffer commandBuffer, uint32_t eventCount, const VkEvent *pEvents,
+    VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask,
+    uint32_t memoryBarrierCount, const VkMemoryBarrier *pMemoryBarriers,
+    uint32_t bufferMemoryBarrierCount, const VkBufferMemoryBarrier *pBufferMemoryBarriers,
+    uint32_t imageMemoryBarrierCount, const VkImageMemoryBarrier *pImageMemoryBarriers)
 {
-	SERIALISE_ELEMENT(ResourceId, cmdid, GetResID(cmdBuffer));
-	SERIALISE_ELEMENT(VkPipelineStageFlagBits, srcStages, (VkPipelineStageFlagBits)srcStageMask);
-	SERIALISE_ELEMENT(VkPipelineStageFlagBits, destStages, (VkPipelineStageFlagBits)dstStageMask);
-	
-	// we don't serialise the original events as we are going to replace this
-	// with our own
-	
-	SERIALISE_ELEMENT(uint32_t, memCount, memoryBarrierCount);
-	SERIALISE_ELEMENT(uint32_t, bufCount, bufferMemoryBarrierCount);
-	SERIALISE_ELEMENT(uint32_t, imgCount, imageMemoryBarrierCount);
+  SERIALISE_ELEMENT(commandBuffer);
 
-	// we keep the original memory barriers
-	SERIALISE_ELEMENT_ARR(VkMemoryBarrier, memBarriers, pMemoryBarriers, memCount);
-	SERIALISE_ELEMENT_ARR(VkBufferMemoryBarrier, bufMemBarriers, pBufferMemoryBarriers, bufCount);
-	SERIALISE_ELEMENT_ARR(VkImageMemoryBarrier, imgMemBarriers, pImageMemoryBarriers, imgCount);
+  // we serialise the original events even though we are going to replace them with our own
+  SERIALISE_ELEMENT(eventCount);
+  SERIALISE_ELEMENT_ARRAY(pEvents, eventCount);
 
-	vector<VkImageMemoryBarrier> imgBarriers;
-	vector<VkBufferMemoryBarrier> bufBarriers;
+  SERIALISE_ELEMENT_TYPED(VkPipelineStageFlagBits, srcStageMask)
+      .TypedAs("VkPipelineStageFlags"_lit);
+  SERIALISE_ELEMENT_TYPED(VkPipelineStageFlagBits, dstStageMask)
+      .TypedAs("VkPipelineStageFlags"_lit);
 
-	// it's possible for buffer or image to be NULL if it refers to a resource that is otherwise
-	// not in the log (barriers do not mark resources referenced). If the resource in question does
-	// not exist, then it's safe to skip this barrier.
-	
-	if(m_State < WRITING)
-	{
-		for(uint32_t i=0; i < bufCount; i++)
-			if(bufMemBarriers[i].buffer != VK_NULL_HANDLE)
-				bufBarriers.push_back(bufMemBarriers[i]);
-		
-		for(uint32_t i=0; i < imgCount; i++)
-		{
-			if(imgBarriers[i].image != VK_NULL_HANDLE)
-			{
-				imgBarriers.push_back(imgMemBarriers[i]);
-				ReplacePresentableImageLayout(imgBarriers.back().oldLayout);
-				ReplacePresentableImageLayout(imgBarriers.back().newLayout);
-			}
-		}
-	}
+  SERIALISE_ELEMENT(memoryBarrierCount);
+  SERIALISE_ELEMENT_ARRAY(pMemoryBarriers, memoryBarrierCount);
+  SERIALISE_ELEMENT(bufferMemoryBarrierCount);
+  SERIALISE_ELEMENT_ARRAY(pBufferMemoryBarriers, bufferMemoryBarrierCount);
+  SERIALISE_ELEMENT(imageMemoryBarrierCount);
+  SERIALISE_ELEMENT_ARRAY(pImageMemoryBarriers, imageMemoryBarrierCount);
 
-	SAFE_DELETE_ARRAY(bufMemBarriers);
-	SAFE_DELETE_ARRAY(imgMemBarriers);
+  SERIALISE_CHECK_READ_ERRORS();
 
-	// see top of this file for current event/fence handling
+  rdcarray<VkImageMemoryBarrier> imgBarriers;
+  rdcarray<VkBufferMemoryBarrier> bufBarriers;
 
-	if(m_State == EXECUTING)
-	{
-		if(ShouldRerecordCmd(cmdid) && InRerecordRange())
-		{
-			cmdBuffer = RerecordCmdBuf(cmdid);
+  // it's possible for buffer or image to be NULL if it refers to a resource that is otherwise
+  // not in the log (barriers do not mark resources referenced). If the resource in question does
+  // not exist, then it's safe to skip this barrier.
+  //
+  // Since it's a convenient place, we unwrap at the same time.
+  if(IsReplayingAndReading())
+  {
+    m_LastCmdBufferID = GetResourceManager()->GetOriginalID(GetResID(commandBuffer));
 
-			VkEventCreateInfo evInfo = {
-				VK_STRUCTURE_TYPE_EVENT_CREATE_INFO, NULL, 0,
-			};
+    for(uint32_t i = 0; i < bufferMemoryBarrierCount; i++)
+    {
+      if(pBufferMemoryBarriers[i].buffer != VK_NULL_HANDLE)
+      {
+        bufBarriers.push_back(pBufferMemoryBarriers[i]);
+        bufBarriers.back().buffer = Unwrap(bufBarriers.back().buffer);
 
-			VkEvent ev = VK_NULL_HANDLE;
-			ObjDisp(cmdBuffer)->CreateEvent(Unwrap(GetDev()), &evInfo, NULL, &ev);
-			// don't wrap this event
+        RemapQueueFamilyIndices(bufBarriers.back().srcQueueFamilyIndex,
+                                bufBarriers.back().dstQueueFamilyIndex);
+      }
+    }
 
-			ObjDisp(cmdBuffer)->ResetEvent(Unwrap(GetDev()), ev);
-			ObjDisp(cmdBuffer)->CmdSetEvent(Unwrap(cmdBuffer), ev, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    for(uint32_t i = 0; i < imageMemoryBarrierCount; i++)
+    {
+      if(pImageMemoryBarriers[i].image != VK_NULL_HANDLE)
+      {
+        imgBarriers.push_back(pImageMemoryBarriers[i]);
+        imgBarriers.back().image = Unwrap(imgBarriers.back().image);
 
-			ObjDisp(cmdBuffer)->CmdWaitEvents(Unwrap(cmdBuffer), 1, &ev, (VkPipelineStageFlags)srcStages, (VkPipelineStageFlags)destStages,
-				memCount, memBarriers,
-				(uint32_t)bufBarriers.size(), &bufBarriers[0],
-				(uint32_t)imgBarriers.size(), &imgBarriers[0]);
+        RemapQueueFamilyIndices(imgBarriers.back().srcQueueFamilyIndex,
+                                imgBarriers.back().dstQueueFamilyIndex);
+      }
+    }
 
-			// register to clean this event up once we're done replaying this section of the log
-			m_CleanupEvents.push_back(ev);
+    // see top of this file for current event/fence handling
 
-			ResourceId cmd = GetResID(RerecordCmdBuf(cmdid));
-			GetResourceManager()->RecordBarriers(m_BakedCmdBufferInfo[cmd].imgbarriers, m_ImageLayouts, (uint32_t)imgBarriers.size(), &imgBarriers[0]);
-		}
-	}
-	else if(m_State == READING)
-	{
-		cmdBuffer = GetResourceManager()->GetLiveHandle<VkCommandBuffer>(cmdid);
+    VkEventCreateInfo evInfo = {
+        VK_STRUCTURE_TYPE_EVENT_CREATE_INFO, NULL, 0,
+    };
 
-		VkEventCreateInfo evInfo = {
-			VK_STRUCTURE_TYPE_EVENT_CREATE_INFO, NULL, 0,
-		};
+    VkEvent ev = VK_NULL_HANDLE;
+    ObjDisp(commandBuffer)->CreateEvent(Unwrap(GetDev()), &evInfo, NULL, &ev);
+    // don't wrap this event
 
-		VkEvent ev = VK_NULL_HANDLE;
-		ObjDisp(cmdBuffer)->CreateEvent(Unwrap(GetDev()), &evInfo, NULL, &ev);
-		// don't wrap this event
+    ObjDisp(commandBuffer)->ResetEvent(Unwrap(GetDev()), ev);
 
-		ObjDisp(cmdBuffer)->ResetEvent(Unwrap(GetDev()), ev);
-		ObjDisp(cmdBuffer)->CmdSetEvent(Unwrap(cmdBuffer), ev, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    if(IsActiveReplaying(m_State))
+    {
+      if(InRerecordRange(m_LastCmdBufferID))
+        commandBuffer = RerecordCmdBuf(m_LastCmdBufferID);
+      else
+        commandBuffer = VK_NULL_HANDLE;
 
-		ObjDisp(cmdBuffer)->CmdWaitEvents(Unwrap(cmdBuffer), 1, &ev, (VkPipelineStageFlags)srcStages, (VkPipelineStageFlags)destStages,
-				memCount, memBarriers,
-				(uint32_t)bufBarriers.size(), &bufBarriers[0],
-				(uint32_t)imgBarriers.size(), &imgBarriers[0]);
+      // register to clean this event up once we're done replaying this section of the log
+      m_CleanupEvents.push_back(ev);
+    }
+    else
+    {
+      // since we cache and replay this command buffer we can't clean up this event just when we're
+      // done replaying this section. We have to keep this event until shutdown
+      m_PersistentEvents.push_back(ev);
 
-		// register to clean this event up once we're done replaying this section of the log
-		m_CleanupEvents.push_back(ev);
-		
-		ResourceId cmd = GetResID(cmdBuffer);
-		GetResourceManager()->RecordBarriers(m_BakedCmdBufferInfo[cmd].imgbarriers, m_ImageLayouts, (uint32_t)imgBarriers.size(), &imgBarriers[0]);
-	}
+      for(uint32_t i = 0; i < imageMemoryBarrierCount; i++)
+      {
+        const VkImageMemoryBarrier &b = pImageMemoryBarriers[i];
+        if(b.image != VK_NULL_HANDLE && b.oldLayout == VK_IMAGE_LAYOUT_UNDEFINED)
+        {
+          m_BakedCmdBufferInfo[m_LastCmdBufferID].resourceUsage.push_back(make_rdcpair(
+              GetResID(b.image), EventUsage(m_BakedCmdBufferInfo[m_LastCmdBufferID].curEventID,
+                                            ResourceUsage::Discard)));
+        }
+      }
+    }
 
-	SAFE_DELETE_ARRAY(memBarriers);
+    GetResourceManager()->RecordBarriers(m_BakedCmdBufferInfo[m_LastCmdBufferID].imageStates,
+                                         m_commandQueueFamilies[m_LastCmdBufferID],
+                                         (uint32_t)imgBarriers.size(), &imgBarriers[0]);
 
-	return true;
+    if(commandBuffer != VK_NULL_HANDLE)
+    {
+      // now sanitise layouts before passing to vulkan
+      for(VkImageMemoryBarrier &barrier : imgBarriers)
+      {
+        SanitiseOldImageLayout(barrier.oldLayout);
+        SanitiseNewImageLayout(barrier.newLayout);
+      }
+
+      ObjDisp(commandBuffer)->CmdSetEvent(Unwrap(commandBuffer), ev, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+      ObjDisp(commandBuffer)
+          ->CmdWaitEvents(Unwrap(commandBuffer), 1, &ev, srcStageMask, dstStageMask,
+                          memoryBarrierCount, pMemoryBarriers, (uint32_t)bufBarriers.size(),
+                          bufBarriers.data(), (uint32_t)imgBarriers.size(), imgBarriers.data());
+
+      if(m_ReplayOptions.optimisation != ReplayOptimisationLevel::Fastest)
+      {
+        for(uint32_t i = 0; i < imageMemoryBarrierCount; i++)
+        {
+          const VkImageMemoryBarrier &b = pImageMemoryBarriers[i];
+          if(b.image != VK_NULL_HANDLE && b.oldLayout == VK_IMAGE_LAYOUT_UNDEFINED)
+          {
+            GetDebugManager()->FillWithDiscardPattern(
+                commandBuffer, DiscardType::UndefinedTransition, b.image, b.newLayout,
+                b.subresourceRange, {{0, 0}, {~0U, ~0U}});
+          }
+        }
+      }
+    }
+  }
+
+  return true;
 }
 
-void WrappedVulkan::vkCmdWaitEvents(
-			VkCommandBuffer                                 cmdBuffer,
-			uint32_t                                    eventCount,
-			const VkEvent*                              pEvents,
-			VkPipelineStageFlags                        srcStageMask,
-			VkPipelineStageFlags                        dstStageMask,
-			uint32_t                                    memoryBarrierCount,
-			const VkMemoryBarrier*                      pMemoryBarriers,
-			uint32_t                                    bufferMemoryBarrierCount,
-			const VkBufferMemoryBarrier*                pBufferMemoryBarriers,
-			uint32_t                                    imageMemoryBarrierCount,
-			const VkImageMemoryBarrier*                 pImageMemoryBarriers)
+void WrappedVulkan::vkCmdWaitEvents(VkCommandBuffer commandBuffer, uint32_t eventCount,
+                                    const VkEvent *pEvents, VkPipelineStageFlags srcStageMask,
+                                    VkPipelineStageFlags dstStageMask, uint32_t memoryBarrierCount,
+                                    const VkMemoryBarrier *pMemoryBarriers,
+                                    uint32_t bufferMemoryBarrierCount,
+                                    const VkBufferMemoryBarrier *pBufferMemoryBarriers,
+                                    uint32_t imageMemoryBarrierCount,
+                                    const VkImageMemoryBarrier *pImageMemoryBarriers)
 {
-	{
-		byte *memory = GetTempMemory( sizeof(VkEvent)*eventCount +
-			sizeof(VkBufferMemoryBarrier)*bufferMemoryBarrierCount + 
-			sizeof(VkImageMemoryBarrier)*imageMemoryBarrierCount);
+  {
+    byte *memory = GetTempMemory(sizeof(VkEvent) * eventCount +
+                                 sizeof(VkBufferMemoryBarrier) * bufferMemoryBarrierCount +
+                                 sizeof(VkImageMemoryBarrier) * imageMemoryBarrierCount);
 
-		VkEvent *ev = (VkEvent *)memory;
-		VkImageMemoryBarrier *im = (VkImageMemoryBarrier *)(ev + eventCount);
-		VkBufferMemoryBarrier *buf = (VkBufferMemoryBarrier *)(im + imageMemoryBarrierCount);
+    VkEvent *ev = (VkEvent *)memory;
+    VkImageMemoryBarrier *im = (VkImageMemoryBarrier *)(ev + eventCount);
+    VkBufferMemoryBarrier *buf = (VkBufferMemoryBarrier *)(im + imageMemoryBarrierCount);
 
-		for(uint32_t i=0; i < eventCount; i++)
-			ev[i] = Unwrap(pEvents[i]);
+    for(uint32_t i = 0; i < eventCount; i++)
+      ev[i] = Unwrap(pEvents[i]);
 
-		for(uint32_t i=0; i < bufferMemoryBarrierCount; i++)
-		{
-			buf[i] = pBufferMemoryBarriers[i];
-			buf[i].buffer = Unwrap(buf[i].buffer);
-		}
+    for(uint32_t i = 0; i < bufferMemoryBarrierCount; i++)
+    {
+      buf[i] = pBufferMemoryBarriers[i];
+      buf[i].buffer = Unwrap(buf[i].buffer);
+    }
 
-		for(uint32_t i=0; i < imageMemoryBarrierCount; i++)
-		{
-			im[i] = pImageMemoryBarriers[i];
-			im[i].image = Unwrap(im[i].image);
-		}
-		
-		ObjDisp(cmdBuffer)->CmdWaitEvents(Unwrap(cmdBuffer), eventCount, ev, srcStageMask, dstStageMask,
-			memoryBarrierCount, pMemoryBarriers,
-			bufferMemoryBarrierCount, buf,
-			imageMemoryBarrierCount, im);
-	}
+    for(uint32_t i = 0; i < imageMemoryBarrierCount; i++)
+    {
+      im[i] = pImageMemoryBarriers[i];
+      im[i].image = Unwrap(im[i].image);
+    }
 
-	if(m_State >= WRITING)
-	{
-		VkResourceRecord *record = GetRecord(cmdBuffer);
+    SERIALISE_TIME_CALL(ObjDisp(commandBuffer)
+                            ->CmdWaitEvents(Unwrap(commandBuffer), eventCount, ev, srcStageMask,
+                                            dstStageMask, memoryBarrierCount, pMemoryBarriers,
+                                            bufferMemoryBarrierCount, buf, imageMemoryBarrierCount,
+                                            im));
+  }
 
-		CACHE_THREAD_SERIALISER();
+  if(IsCaptureMode(m_State))
+  {
+    VkResourceRecord *record = GetRecord(commandBuffer);
 
-		SCOPED_SERIALISE_CONTEXT(CMD_WAIT_EVENTS);
-		Serialise_vkCmdWaitEvents(localSerialiser, cmdBuffer, eventCount, pEvents, srcStageMask, dstStageMask,
-			memoryBarrierCount, pMemoryBarriers,
-			bufferMemoryBarrierCount, pBufferMemoryBarriers,
-			imageMemoryBarrierCount, pImageMemoryBarriers);
-		
-		if(imageMemoryBarrierCount > 0)
-		{
-			SCOPED_LOCK(m_ImageLayoutsLock);
-			GetResourceManager()->RecordBarriers(GetRecord(cmdBuffer)->cmdInfo->imgbarriers, m_ImageLayouts, imageMemoryBarrierCount, pImageMemoryBarriers);
-		}
+    CACHE_THREAD_SERIALISER();
 
-		record->AddChunk(scope.Get());
-		for(uint32_t i=0; i < eventCount; i++)
-			record->MarkResourceFrameReferenced(GetResID(pEvents[i]), eFrameRef_Read);
-	}
+    SCOPED_SERIALISE_CHUNK(VulkanChunk::vkCmdWaitEvents);
+    Serialise_vkCmdWaitEvents(ser, commandBuffer, eventCount, pEvents, srcStageMask, dstStageMask,
+                              memoryBarrierCount, pMemoryBarriers, bufferMemoryBarrierCount,
+                              pBufferMemoryBarriers, imageMemoryBarrierCount, pImageMemoryBarriers);
+
+    if(imageMemoryBarrierCount > 0)
+    {
+      GetResourceManager()->RecordBarriers(record->cmdInfo->imageStates,
+                                           record->pool->cmdPoolInfo->queueFamilyIndex,
+                                           imageMemoryBarrierCount, pImageMemoryBarriers);
+    }
+
+    record->AddChunk(scope.Get(record->cmdInfo->alloc));
+    for(uint32_t i = 0; i < eventCount; i++)
+      record->MarkResourceFrameReferenced(GetResID(pEvents[i]), eFrameRef_Read);
+  }
 }
+
+VkResult WrappedVulkan::vkImportSemaphoreFdKHR(VkDevice device,
+                                               const VkImportSemaphoreFdInfoKHR *pImportSemaphoreFdInfo)
+{
+  VkImportSemaphoreFdInfoKHR unwrappedInfo = *pImportSemaphoreFdInfo;
+  unwrappedInfo.semaphore = Unwrap(unwrappedInfo.semaphore);
+
+  return ObjDisp(device)->ImportSemaphoreFdKHR(Unwrap(device), &unwrappedInfo);
+}
+
+VkResult WrappedVulkan::vkGetSemaphoreFdKHR(VkDevice device,
+                                            const VkSemaphoreGetFdInfoKHR *pGetFdInfo, int *pFd)
+{
+  VkSemaphoreGetFdInfoKHR unwrappedInfo = *pGetFdInfo;
+  unwrappedInfo.semaphore = Unwrap(unwrappedInfo.semaphore);
+  return ObjDisp(device)->GetSemaphoreFdKHR(Unwrap(device), &unwrappedInfo, pFd);
+}
+
+VkResult WrappedVulkan::vkImportFenceFdKHR(VkDevice device,
+                                           const VkImportFenceFdInfoKHR *pImportFenceFdInfo)
+{
+  VkImportFenceFdInfoKHR unwrappedInfo = *pImportFenceFdInfo;
+  unwrappedInfo.fence = Unwrap(unwrappedInfo.fence);
+
+  return ObjDisp(device)->ImportFenceFdKHR(Unwrap(device), &unwrappedInfo);
+}
+
+VkResult WrappedVulkan::vkGetFenceFdKHR(VkDevice device, const VkFenceGetFdInfoKHR *pGetFdInfo,
+                                        int *pFd)
+{
+  VkFenceGetFdInfoKHR unwrappedInfo = *pGetFdInfo;
+  unwrappedInfo.fence = Unwrap(unwrappedInfo.fence);
+  return ObjDisp(device)->GetFenceFdKHR(Unwrap(device), &unwrappedInfo, pFd);
+}
+
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkGetSemaphoreCounterValue(SerialiserType &ser, VkDevice device,
+                                                         VkSemaphore semaphore, uint64_t *pValue)
+{
+  SERIALISE_ELEMENT(device);
+  SERIALISE_ELEMENT(semaphore);
+  SERIALISE_ELEMENT_OPT(pValue);
+
+  Serialise_DebugMessages(ser);
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    ObjDisp(device)->DeviceWaitIdle(Unwrap(device));
+  }
+
+  return true;
+}
+
+VkResult WrappedVulkan::vkGetSemaphoreCounterValue(VkDevice device, VkSemaphore semaphore,
+                                                   uint64_t *pValue)
+{
+  SCOPED_DBG_SINK();
+
+  VkResult ret;
+  SERIALISE_TIME_CALL(
+      ret = ObjDisp(device)->GetSemaphoreCounterValue(Unwrap(device), Unwrap(semaphore), pValue));
+
+  if(IsActiveCapturing(m_State))
+  {
+    bool alreadySerialised = false;
+
+    {
+      m_FrameCaptureRecord->LockChunks();
+      alreadySerialised = (m_FrameCaptureRecord->NumChunks() > 0 &&
+                           m_FrameCaptureRecord->GetLastChunk()->GetChunkType<VulkanChunk>() ==
+                               VulkanChunk::vkGetSemaphoreCounterValue);
+      m_FrameCaptureRecord->UnlockChunks();
+    }
+
+    if(!alreadySerialised)
+    {
+      CACHE_THREAD_SERIALISER();
+
+      SCOPED_SERIALISE_CHUNK(VulkanChunk::vkGetSemaphoreCounterValue);
+      Serialise_vkGetSemaphoreCounterValue(ser, device, semaphore, pValue);
+
+      m_FrameCaptureRecord->AddChunk(scope.Get());
+      GetResourceManager()->MarkResourceFrameReferenced(GetResID(semaphore), eFrameRef_Read);
+    }
+  }
+
+  return ret;
+}
+
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkWaitSemaphores(SerialiserType &ser, VkDevice device,
+                                               const VkSemaphoreWaitInfo *pWaitInfo, uint64_t timeout)
+{
+  SERIALISE_ELEMENT(device);
+  SERIALISE_ELEMENT_LOCAL(WaitInfo, *pWaitInfo);
+  SERIALISE_ELEMENT(timeout);
+
+  Serialise_DebugMessages(ser);
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    ObjDisp(device)->DeviceWaitIdle(Unwrap(device));
+  }
+
+  return true;
+}
+
+VkResult WrappedVulkan::vkWaitSemaphores(VkDevice device, const VkSemaphoreWaitInfo *pWaitInfo,
+                                         uint64_t timeout)
+{
+  SCOPED_DBG_SINK();
+
+  VkSemaphore *unwrappedSems = GetTempArray<VkSemaphore>(pWaitInfo->semaphoreCount);
+  for(uint32_t i = 0; i < pWaitInfo->semaphoreCount; i++)
+    unwrappedSems[i] = Unwrap(pWaitInfo->pSemaphores[i]);
+
+  VkSemaphoreWaitInfo unwrapped = *pWaitInfo;
+  unwrapped.pSemaphores = unwrappedSems;
+
+  VkResult ret;
+  SERIALISE_TIME_CALL(ret = ObjDisp(device)->WaitSemaphores(Unwrap(device), &unwrapped, timeout));
+
+  if(IsActiveCapturing(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+
+    SCOPED_SERIALISE_CHUNK(VulkanChunk::vkWaitSemaphores);
+    Serialise_vkWaitSemaphores(ser, device, pWaitInfo, timeout);
+
+    m_FrameCaptureRecord->AddChunk(scope.Get());
+    for(uint32_t i = 0; i < pWaitInfo->semaphoreCount; i++)
+      GetResourceManager()->MarkResourceFrameReferenced(GetResID(pWaitInfo->pSemaphores[i]),
+                                                        eFrameRef_Read);
+  }
+
+  return ret;
+}
+
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkSignalSemaphore(SerialiserType &ser, VkDevice device,
+                                                const VkSemaphoreSignalInfo *pSignalInfo)
+{
+  SERIALISE_ELEMENT(device);
+  SERIALISE_ELEMENT_LOCAL(SignalInfo, *pSignalInfo);
+
+  Serialise_DebugMessages(ser);
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    ObjDisp(device)->DeviceWaitIdle(Unwrap(device));
+  }
+
+  return true;
+}
+
+VkResult WrappedVulkan::vkSignalSemaphore(VkDevice device, const VkSemaphoreSignalInfo *pSignalInfo)
+{
+  VkSemaphoreSignalInfo unwrapped = *pSignalInfo;
+  unwrapped.semaphore = Unwrap(unwrapped.semaphore);
+
+  SCOPED_DBG_SINK();
+
+  VkResult ret;
+  SERIALISE_TIME_CALL(ret = ObjDisp(device)->SignalSemaphore(Unwrap(device), &unwrapped));
+
+  if(IsActiveCapturing(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+
+    SCOPED_SERIALISE_CHUNK(VulkanChunk::vkSignalSemaphore);
+    Serialise_vkSignalSemaphore(ser, device, pSignalInfo);
+
+    m_FrameCaptureRecord->AddChunk(scope.Get());
+    GetResourceManager()->MarkResourceFrameReferenced(GetResID(pSignalInfo->semaphore),
+                                                      eFrameRef_Read);
+  }
+
+  return ret;
+}
+
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+
+VkResult WrappedVulkan::vkImportSemaphoreWin32HandleKHR(
+    VkDevice device, const VkImportSemaphoreWin32HandleInfoKHR *pImportSemaphoreWin32HandleInfo)
+{
+  VkImportSemaphoreWin32HandleInfoKHR unwrappedInfo = *pImportSemaphoreWin32HandleInfo;
+  unwrappedInfo.semaphore = Unwrap(unwrappedInfo.semaphore);
+
+  return ObjDisp(device)->ImportSemaphoreWin32HandleKHR(Unwrap(device), &unwrappedInfo);
+}
+
+VkResult WrappedVulkan::vkGetSemaphoreWin32HandleKHR(
+    VkDevice device, const VkSemaphoreGetWin32HandleInfoKHR *pGetWin32HandleInfo, HANDLE *pHandle)
+{
+  VkSemaphoreGetWin32HandleInfoKHR unwrappedInfo = *pGetWin32HandleInfo;
+  unwrappedInfo.semaphore = Unwrap(unwrappedInfo.semaphore);
+  return ObjDisp(device)->GetSemaphoreWin32HandleKHR(Unwrap(device), &unwrappedInfo, pHandle);
+}
+
+VkResult WrappedVulkan::vkImportFenceWin32HandleKHR(
+    VkDevice device, const VkImportFenceWin32HandleInfoKHR *pImportFenceWin32HandleInfo)
+{
+  VkImportFenceWin32HandleInfoKHR unwrappedInfo = *pImportFenceWin32HandleInfo;
+  unwrappedInfo.fence = Unwrap(unwrappedInfo.fence);
+
+  return ObjDisp(device)->ImportFenceWin32HandleKHR(Unwrap(device), &unwrappedInfo);
+}
+
+VkResult WrappedVulkan::vkGetFenceWin32HandleKHR(
+    VkDevice device, const VkFenceGetWin32HandleInfoKHR *pGetWin32HandleInfo, HANDLE *pHandle)
+{
+  VkFenceGetWin32HandleInfoKHR unwrappedInfo = *pGetWin32HandleInfo;
+  unwrappedInfo.fence = Unwrap(unwrappedInfo.fence);
+  return ObjDisp(device)->GetFenceWin32HandleKHR(Unwrap(device), &unwrappedInfo, pHandle);
+}
+
+#endif
+
+INSTANTIATE_FUNCTION_SERIALISED(VkResult, vkCreateFence, VkDevice device,
+                                const VkFenceCreateInfo *pCreateInfo,
+                                const VkAllocationCallbacks *pAllocator, VkFence *pFence);
+
+INSTANTIATE_FUNCTION_SERIALISED(VkResult, vkGetFenceStatus, VkDevice device, VkFence fence);
+
+INSTANTIATE_FUNCTION_SERIALISED(VkResult, vkResetFences, VkDevice device, uint32_t fenceCount,
+                                const VkFence *pFences);
+
+INSTANTIATE_FUNCTION_SERIALISED(VkResult, vkWaitForFences, VkDevice device, uint32_t fenceCount,
+                                const VkFence *pFences, VkBool32 waitAll, uint64_t timeout);
+
+INSTANTIATE_FUNCTION_SERIALISED(VkResult, vkCreateEvent, VkDevice device,
+                                const VkEventCreateInfo *pCreateInfo,
+                                const VkAllocationCallbacks *pAllocator, VkEvent *pEvent);
+
+INSTANTIATE_FUNCTION_SERIALISED(VkResult, vkSetEvent, VkDevice device, VkEvent event);
+
+INSTANTIATE_FUNCTION_SERIALISED(VkResult, vkResetEvent, VkDevice device, VkEvent event);
+
+INSTANTIATE_FUNCTION_SERIALISED(VkResult, vkGetEventStatus, VkDevice device, VkEvent event);
+
+INSTANTIATE_FUNCTION_SERIALISED(VkResult, vkCreateSemaphore, VkDevice device,
+                                const VkSemaphoreCreateInfo *pCreateInfo,
+                                const VkAllocationCallbacks *pAllocator, VkSemaphore *pSemaphore);
+
+INSTANTIATE_FUNCTION_SERIALISED(void, vkCmdSetEvent, VkCommandBuffer commandBuffer, VkEvent event,
+                                VkPipelineStageFlags stageMask);
+
+INSTANTIATE_FUNCTION_SERIALISED(void, vkCmdResetEvent, VkCommandBuffer commandBuffer, VkEvent event,
+                                VkPipelineStageFlags stageMask);
+
+INSTANTIATE_FUNCTION_SERIALISED(void, vkCmdWaitEvents, VkCommandBuffer commandBuffer,
+                                uint32_t eventCount, const VkEvent *pEvents,
+                                VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask,
+                                uint32_t memoryBarrierCount, const VkMemoryBarrier *pMemoryBarriers,
+                                uint32_t bufferMemoryBarrierCount,
+                                const VkBufferMemoryBarrier *pBufferMemoryBarriers,
+                                uint32_t imageMemoryBarrierCount,
+                                const VkImageMemoryBarrier *pImageMemoryBarriers);
+
+INSTANTIATE_FUNCTION_SERIALISED(void, vkGetSemaphoreCounterValue, VkDevice device,
+                                VkSemaphore semaphore, uint64_t *pValue);
+
+INSTANTIATE_FUNCTION_SERIALISED(void, vkWaitSemaphores, VkDevice device,
+                                const VkSemaphoreWaitInfo *pWaitInfo, uint64_t timeout);
+
+INSTANTIATE_FUNCTION_SERIALISED(void, vkSignalSemaphore, VkDevice device,
+                                const VkSemaphoreSignalInfo *pSignalInfo);

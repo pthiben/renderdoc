@@ -1,19 +1,19 @@
 /******************************************************************************
  * The MIT License (MIT)
- * 
- * Copyright (c) 2015-2016 Baldur Karlsson
+ *
+ * Copyright (c) 2019-2020 Baldur Karlsson
  * Copyright (c) 2014 Crytek
- * 
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
  * in the Software without restriction, including without limitation the rights
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -23,211 +23,251 @@
  * THE SOFTWARE.
  ******************************************************************************/
 
-
-#include "driver/d3d11/d3d11_context.h"
-#include "driver/d3d11/d3d11_resources.h"
-#include "driver/d3d11/d3d11_renderstate.h"
-
-#include "official/dxgi1_3.h"
+#include "d3d11_context.h"
+#include "driver/dx/official/dxgi1_3.h"
+#include "strings/string_utils.h"
+#include "tinyfiledialogs/tinyfiledialogs.h"
+#include "d3d11_debug.h"
+#include "d3d11_renderstate.h"
+#include "d3d11_resources.h"
 
 #ifndef DXGI_ERROR_INVALID_CALL
-#define DXGI_ERROR_INVALID_CALL                 MAKE_DXGI_HRESULT(1)
+#define DXGI_ERROR_INVALID_CALL MAKE_DXGI_HRESULT(1)
 #endif
-
-#include "serialise/string_utils.h"
 
 uint32_t NullCBOffsets[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
 uint32_t NullCBCounts[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
 
 #pragma region D3DPERF
 
-bool WrappedID3D11DeviceContext::Serialise_SetMarker(uint32_t col, const wchar_t *name_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_SetMarker(SerialiserType &ser, uint32_t Color,
+                                                     const wchar_t *MarkerNameW)
 {
-	SERIALISE_ELEMENT(uint32_t, colour, col);
-	
-	string name;
-	
-	if(m_State >= WRITING)
-	{
-		wstring wname = name_ ? name_ : L"";
-		name = StringFormat::Wide2UTF8(wname);
-	}
+  SERIALISE_ELEMENT(Color);
+  SERIALISE_ELEMENT_LOCAL(MarkerName, StringFormat::Wide2UTF8(MarkerNameW ? MarkerNameW : L""));
 
-	m_pSerialiser->Serialise("Name", name);
+  SERIALISE_CHECK_READ_ERRORS();
 
-	if(m_State == READING)
-	{
-		FetchDrawcall draw;
-		draw.name = name;
-		draw.flags |= eDraw_SetMarker;
+  if(IsReplayingAndReading())
+  {
+    D3D11MarkerRegion::Set(MarkerName);
 
-		AddDrawcall(draw, false);
-	}
+    if(IsLoading(m_State))
+    {
+      DrawcallDescription draw;
+      draw.name = MarkerName;
+      draw.flags |= DrawFlags::SetMarker;
 
-	return true;
+      byte alpha = (Color >> 24) & 0xff;
+      byte red = (Color >> 16) & 0xff;
+      byte green = (Color >> 8) & 0xff;
+      byte blue = (Color >> 0) & 0xff;
+
+      draw.markerColor[0] = float(red) / 255.0f;
+      draw.markerColor[1] = float(green) / 255.0f;
+      draw.markerColor[2] = float(blue) / 255.0f;
+      draw.markerColor[3] = float(alpha) / 255.0f;
+
+      AddEvent();
+      AddDrawcall(draw, false);
+    }
+  }
+
+  return true;
 }
 
-bool WrappedID3D11DeviceContext::Serialise_PushEvent(uint32_t col, const wchar_t *name_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_PushMarker(SerialiserType &ser, uint32_t Color,
+                                                      const wchar_t *MarkerNameW)
 {
-	SERIALISE_ELEMENT(uint32_t, colour, col);
-	
-	string name;
-	
-	if(m_State >= WRITING)
-	{
-		wstring wname = name_ ? name_ : L"";
-		name = StringFormat::Wide2UTF8(wname);
-	}
+  SERIALISE_ELEMENT(Color);
+  SERIALISE_ELEMENT_LOCAL(MarkerName, StringFormat::Wide2UTF8(MarkerNameW ? MarkerNameW : L""));
 
-	m_pSerialiser->Serialise("Name", name);
+  SERIALISE_CHECK_READ_ERRORS();
 
-	if(m_State == READING)
-	{
-		FetchDrawcall draw;
-		draw.name = name;
-		draw.flags |= eDraw_PushMarker;
+  if(IsReplayingAndReading())
+  {
+    D3D11MarkerRegion::Begin(MarkerName);
+    m_pDevice->ReplayPushEvent();
 
-		AddDrawcall(draw, false);
-	}
+    if(IsLoading(m_State))
+    {
+      DrawcallDescription draw;
+      draw.name = MarkerName;
+      draw.flags |= DrawFlags::PushMarker;
 
-	return true;
+      byte alpha = (Color >> 24) & 0xff;
+      byte red = (Color >> 16) & 0xff;
+      byte green = (Color >> 8) & 0xff;
+      byte blue = (Color >> 0) & 0xff;
+
+      draw.markerColor[0] = float(red) / 255.0f;
+      draw.markerColor[1] = float(green) / 255.0f;
+      draw.markerColor[2] = float(blue) / 255.0f;
+      draw.markerColor[3] = float(alpha) / 255.0f;
+
+      AddEvent();
+      AddDrawcall(draw, false);
+    }
+  }
+
+  return true;
 }
 
-bool WrappedID3D11DeviceContext::Serialise_PopEvent()
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_PopMarker(SerialiserType &ser)
 {
-	if(m_State == READING && !m_CurEvents.empty())
-	{
-		FetchDrawcall draw;
-		draw.name = "API Calls";
-		draw.flags |= eDraw_SetMarker;
+  if(IsReplayingAndReading())
+  {
+    D3D11MarkerRegion::End();
+    m_pDevice->ReplayPopEvent();
 
-		AddDrawcall(draw, true);
-	}
+    if(IsLoading(m_State) && HasNonMarkerEvents())
+    {
+      DrawcallDescription draw;
+      draw.name = "API Calls";
+      draw.flags |= DrawFlags::APICalls;
 
-	return true;
+      AddEvent();
+      AddDrawcall(draw, true);
+    }
+  }
+
+  return true;
 }
 
-void WrappedID3D11DeviceContext::SetMarker(uint32_t col, const wchar_t *name)
+void WrappedID3D11DeviceContext::SetMarker(uint32_t Color, const wchar_t *MarkerName)
 {
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_MARKER);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_SetMarker(col, name);
+  SERIALISE_TIME_CALL();
 
-		m_ContextRecord->AddChunk(scope.Get());
-	}
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::SetMarker);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_SetMarker(GET_SERIALISER, Color, MarkerName);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
 }
 
-int WrappedID3D11DeviceContext::PushEvent(uint32_t col, const wchar_t *name)
+int WrappedID3D11DeviceContext::PushMarker(uint32_t Color, const wchar_t *MarkerName)
 {
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(PUSH_EVENT);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_PushEvent(col, name);
+  SERIALISE_TIME_CALL();
 
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	return m_MarkerIndentLevel++;
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::PushMarker);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_PushMarker(GET_SERIALISER, Color, MarkerName);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  return m_MarkerIndentLevel++;
 }
 
-int WrappedID3D11DeviceContext::PopEvent()
+int WrappedID3D11DeviceContext::PopMarker()
 {
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(POP_EVENT);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_PopEvent();
+  SERIALISE_TIME_CALL();
 
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	return --m_MarkerIndentLevel;
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::PopMarker);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_PopMarker(GET_SERIALISER);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  return --m_MarkerIndentLevel;
 }
 
 void WrappedID3D11DeviceContext::ThreadSafe_SetMarker(uint32_t col, const wchar_t *name)
 {
-	Annotation annot;
-	annot.m_Type = Annotation::ANNOT_SETMARKER;
-	annot.m_Col = col;
-	annot.m_Name = name;
+  Annotation annot;
+  annot.m_Type = Annotation::ANNOT_SETMARKER;
+  annot.m_Col = col;
+  annot.m_Name = StringFormat::Wide2UTF8(name);
 
-	{
-		SCOPED_LOCK(m_AnnotLock);
-		m_AnnotationQueue.push_back(annot);
-	}
+  {
+    SCOPED_LOCK(m_AnnotLock);
+    m_AnnotationQueue.push_back(annot);
+  }
 }
 
 int WrappedID3D11DeviceContext::ThreadSafe_BeginEvent(uint32_t col, const wchar_t *name)
 {
-	Annotation annot;
-	annot.m_Type = Annotation::ANNOT_BEGINEVENT;
-	annot.m_Col = col;
-	annot.m_Name = name;
+  Annotation annot;
+  annot.m_Type = Annotation::ANNOT_BEGINEVENT;
+  annot.m_Col = col;
+  annot.m_Name = StringFormat::Wide2UTF8(name);
 
-	{
-		SCOPED_LOCK(m_AnnotLock);
-		m_AnnotationQueue.push_back(annot);
-	}
+  {
+    SCOPED_LOCK(m_AnnotLock);
+    m_AnnotationQueue.push_back(annot);
+  }
 
-	// not thread safe but I don't want to lock over access to this - if people use D3DPERF + MT
-	// they shouldn't rely on this return value anyway :).
-	return m_MarkerIndentLevel;
+  // not thread safe but I don't want to lock over access to this - if people use D3DPERF + MT
+  // they shouldn't rely on this return value anyway :).
+  return m_MarkerIndentLevel;
 }
 
 int WrappedID3D11DeviceContext::ThreadSafe_EndEvent()
 {
-	Annotation annot;
-	annot.m_Type = Annotation::ANNOT_ENDEVENT;
+  Annotation annot;
+  annot.m_Type = Annotation::ANNOT_ENDEVENT;
 
-	{
-		SCOPED_LOCK(m_AnnotLock);
-		m_AnnotationQueue.push_back(annot);
-	}
+  {
+    SCOPED_LOCK(m_AnnotLock);
+    m_AnnotationQueue.push_back(annot);
+  }
 
-	// not thread safe but I don't want to lock over access to this - if people use D3DPERF + MT
-	// they shouldn't rely on this return value anyway :).
-	return m_MarkerIndentLevel-1;
+  // not thread safe but I don't want to lock over access to this - if people use D3DPERF + MT
+  // they shouldn't rely on this return value anyway :).
+  return m_MarkerIndentLevel - 1;
 }
 
 void WrappedID3D11DeviceContext::DrainAnnotationQueue()
 {
-	if(m_State != WRITING_CAPFRAME)
-		return;
+  if(!IsActiveCapturing(m_State))
+    return;
 
-	m_AnnotLock.Lock();
+  m_AnnotLock.Lock();
 
-	// fastest possible early-out
-	if(m_AnnotationQueue.empty())
-	{
-		m_AnnotLock.Unlock();
-		return;
-	}
+  // fastest possible early-out
+  if(m_AnnotationQueue.empty())
+  {
+    m_AnnotLock.Unlock();
+    return;
+  }
 
-	vector<Annotation> annotations;
-	annotations.swap(m_AnnotationQueue);
-	
-	m_AnnotLock.Unlock();
+  rdcarray<Annotation> annotations;
+  annotations.swap(m_AnnotationQueue);
 
-	for(size_t i=0; i < annotations.size(); i++)
-	{
-		const Annotation &a = annotations[i];
+  m_AnnotLock.Unlock();
 
-		switch(a.m_Type)
-		{
-			case Annotation::ANNOT_SETMARKER:
-				SetMarker(a.m_Col, a.m_Name.c_str());
-				break;
-			case Annotation::ANNOT_BEGINEVENT:
-				PushEvent(a.m_Col, a.m_Name.c_str());
-				break;
-			case Annotation::ANNOT_ENDEVENT:
-				PopEvent();
-				break;
-		}
-	}
+  for(size_t i = 0; i < annotations.size(); i++)
+  {
+    const Annotation &a = annotations[i];
+
+    switch(a.m_Type)
+    {
+      case Annotation::ANNOT_SETMARKER:
+        SetMarker(a.m_Col, StringFormat::UTF82Wide(a.m_Name).c_str());
+        break;
+      case Annotation::ANNOT_BEGINEVENT:
+        PushMarker(a.m_Col, StringFormat::UTF82Wide(a.m_Name).c_str());
+        break;
+      case Annotation::ANNOT_ENDEVENT: PopMarker(); break;
+    }
+  }
 }
 
 #pragma endregion D3DPERF
@@ -236,1706 +276,1882 @@ void WrappedID3D11DeviceContext::DrainAnnotationQueue()
 
 void WrappedID3D11DeviceContext::IAGetInputLayout(ID3D11InputLayout **ppInputLayout)
 {
-	if(ppInputLayout)
-	{
-		ID3D11InputLayout *real = NULL;
-		m_pRealContext->IAGetInputLayout(&real);
-	
-		SAFE_RELEASE_NOCLEAR(real);
-		*ppInputLayout = (ID3D11InputLayout *)m_pDevice->GetResourceManager()->GetWrapper(real);
-		SAFE_ADDREF(*ppInputLayout);
+  if(ppInputLayout)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		RDCASSERT(*ppInputLayout == m_CurrentPipelineState->IA.Layout);
-	}
+    ID3D11InputLayout *real = NULL;
+    m_pRealContext->IAGetInputLayout(&real);
+
+    SAFE_RELEASE_NOCLEAR(real);
+    *ppInputLayout = (ID3D11InputLayout *)m_pDevice->GetResourceManager()->GetWrapper(real);
+    SAFE_ADDREF(*ppInputLayout);
+
+    RDCASSERT(*ppInputLayout == m_CurrentPipelineState->IA.Layout);
+  }
 }
 
 void WrappedID3D11DeviceContext::IAGetVertexBuffers(UINT StartSlot, UINT NumBuffers,
-													ID3D11Buffer **ppVertexBuffers, UINT *pStrides, UINT *pOffsets)
+                                                    ID3D11Buffer **ppVertexBuffers, UINT *pStrides,
+                                                    UINT *pOffsets)
 {
-	ID3D11Buffer *real[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {0};
-	m_pRealContext->IAGetVertexBuffers(StartSlot, NumBuffers, real, pStrides, pOffsets);
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	for(UINT i=0; i < NumBuffers; i++)
-	{
-		SAFE_RELEASE_NOCLEAR(real[i]);
-		if(ppVertexBuffers)
-		{
-			ppVertexBuffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppVertexBuffers[i]);
+  ID3D11Buffer *real[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {0};
+  m_pRealContext->IAGetVertexBuffers(StartSlot, NumBuffers, real, pStrides, pOffsets);
 
-			RDCASSERT(ppVertexBuffers[i] == m_CurrentPipelineState->IA.VBs[i+StartSlot]);
-		}
+  for(UINT i = 0; i < NumBuffers; i++)
+  {
+    SAFE_RELEASE_NOCLEAR(real[i]);
+    if(ppVertexBuffers)
+    {
+      ppVertexBuffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppVertexBuffers[i]);
 
-		// D3D11 really inconsistently tracks these.
-		//RDCASSERT(pStrides[i] == m_CurrentPipelineState->IA.Strides[i+StartSlot]);
-		//RDCASSERT(pOffsets[i] == m_CurrentPipelineState->IA.Offsets[i+StartSlot]);
-	}
+      RDCASSERT(ppVertexBuffers[i] == m_CurrentPipelineState->IA.VBs[i + StartSlot]);
+    }
+
+    // D3D11 really inconsistently tracks these.
+    // RDCASSERT(pStrides[i] == m_CurrentPipelineState->IA.Strides[i+StartSlot]);
+    // RDCASSERT(pOffsets[i] == m_CurrentPipelineState->IA.Offsets[i+StartSlot]);
+  }
 }
 
-void WrappedID3D11DeviceContext::IAGetIndexBuffer(ID3D11Buffer **pIndexBuffer, DXGI_FORMAT *Format, UINT *Offset)
+void WrappedID3D11DeviceContext::IAGetIndexBuffer(ID3D11Buffer **pIndexBuffer, DXGI_FORMAT *Format,
+                                                  UINT *Offset)
 {
-	if(pIndexBuffer)
-	{
-		ID3D11Buffer *real = NULL;
-		m_pRealContext->IAGetIndexBuffer(&real, Format, Offset);
+  if(pIndexBuffer)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		SAFE_RELEASE_NOCLEAR(real);
-		*pIndexBuffer = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetWrapper(real);
-		SAFE_ADDREF(*pIndexBuffer);
+    ID3D11Buffer *real = NULL;
+    m_pRealContext->IAGetIndexBuffer(&real, Format, Offset);
 
-		RDCASSERT(*pIndexBuffer == m_CurrentPipelineState->IA.IndexBuffer);
+    SAFE_RELEASE_NOCLEAR(real);
+    *pIndexBuffer = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetWrapper(real);
+    SAFE_ADDREF(*pIndexBuffer);
 
-		if (Format)
-			RDCASSERT(*Format == m_CurrentPipelineState->IA.IndexFormat);
-		if (Offset)
-			RDCASSERT(*Offset == m_CurrentPipelineState->IA.IndexOffset);
-	}
+    RDCASSERT(*pIndexBuffer == m_CurrentPipelineState->IA.IndexBuffer);
+
+    if(Format)
+      RDCASSERT(*Format == m_CurrentPipelineState->IA.IndexFormat);
+    if(Offset)
+      RDCASSERT(*Offset == m_CurrentPipelineState->IA.IndexOffset);
+  }
 }
 
 void WrappedID3D11DeviceContext::IAGetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY *pTopology)
 {
-	m_pRealContext->IAGetPrimitiveTopology(pTopology);
-	if(pTopology)
-		RDCASSERT(*pTopology == m_CurrentPipelineState->IA.Topo);
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
+
+  m_pRealContext->IAGetPrimitiveTopology(pTopology);
+  if(pTopology)
+    RDCASSERT(*pTopology == m_CurrentPipelineState->IA.Topo);
 }
 
-bool WrappedID3D11DeviceContext::Serialise_IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY Topology_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_IASetPrimitiveTopology(SerialiserType &ser,
+                                                                  D3D11_PRIMITIVE_TOPOLOGY Topology)
 {
-	SERIALISE_ELEMENT(D3D11_PRIMITIVE_TOPOLOGY, Topology, Topology_);
+  SERIALISE_ELEMENT(Topology);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.Topo, Topology);
-		m_pRealContext->IASetPrimitiveTopology(Topology);
-		VerifyState();
-	}
+  SERIALISE_CHECK_READ_ERRORS();
 
-	return true;
+  if(IsReplayingAndReading())
+  {
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.Topo, Topology);
+    m_pRealContext->IASetPrimitiveTopology(Topology);
+    VerifyState();
+  }
+
+  return true;
 }
 
 void WrappedID3D11DeviceContext::IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY Topology)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_TOPOLOGY);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_IASetPrimitiveTopology(Topology);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.Topo, Topology);
-	m_pRealContext->IASetPrimitiveTopology(Topology);
-	VerifyState();
+  m_EmptyCommandList = false;
+
+  SERIALISE_TIME_CALL(m_pRealContext->IASetPrimitiveTopology(Topology));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::IASetPrimitiveTopology);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_IASetPrimitiveTopology(GET_SERIALISER, Topology);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.Topo, Topology);
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_IASetInputLayout(ID3D11InputLayout *pInputLayout)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_IASetInputLayout(SerialiserType &ser,
+                                                            ID3D11InputLayout *pInputLayout)
 {
-	SERIALISE_ELEMENT(ResourceId, InputLayout, GetIDForResource(pInputLayout));
+  SERIALISE_ELEMENT(pInputLayout);
 
-	if(m_State <= EXECUTING)
-	{
-		pInputLayout = NULL;
-		if(m_pDevice->GetResourceManager()->HasLiveResource(InputLayout))
-			pInputLayout = (ID3D11InputLayout *)m_pDevice->GetResourceManager()->GetLiveResource(InputLayout);
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->IA.Layout, pInputLayout);
-		m_pRealContext->IASetInputLayout(UNWRAP(WrappedID3D11InputLayout, pInputLayout));
-		VerifyState();
-	}
+  SERIALISE_CHECK_READ_ERRORS();
 
-	return true;
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordLayoutBindStats(pInputLayout);
+
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->IA.Layout, pInputLayout);
+    m_pRealContext->IASetInputLayout(UNWRAP(WrappedID3D11InputLayout, pInputLayout));
+    VerifyState();
+  }
+
+  return true;
 }
 
 void WrappedID3D11DeviceContext::IASetInputLayout(ID3D11InputLayout *pInputLayout)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_INPUT_LAYOUT);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_IASetInputLayout(pInputLayout);
+  m_EmptyCommandList = false;
 
-		MarkResourceReferenced(GetIDForResource(pInputLayout), eFrameRef_Read);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
+  SERIALISE_TIME_CALL(
+      m_pRealContext->IASetInputLayout(UNWRAP(WrappedID3D11InputLayout, pInputLayout)));
 
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->IA.Layout, pInputLayout);
-	m_pRealContext->IASetInputLayout(UNWRAP(WrappedID3D11InputLayout, pInputLayout));
-	VerifyState();
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::IASetInputLayout);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_IASetInputLayout(GET_SERIALISER, pInputLayout);
+
+    MarkResourceReferenced(GetIDForDeviceChild(pInputLayout), eFrameRef_Read);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->IA.Layout, pInputLayout);
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_IASetVertexBuffers(UINT StartSlot_, UINT NumBuffers_,
-															ID3D11Buffer *const *ppVertexBuffers, const UINT *pStrides, const UINT *pOffsets)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_IASetVertexBuffers(SerialiserType &ser, UINT StartSlot,
+                                                              UINT NumBuffers,
+                                                              ID3D11Buffer *const *ppVertexBuffers,
+                                                              const UINT *pStrides,
+                                                              const UINT *pOffsets)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumBuffers, NumBuffers_);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumBuffers);
+  SERIALISE_ELEMENT_ARRAY(ppVertexBuffers, NumBuffers);
+  SERIALISE_ELEMENT_ARRAY(pStrides, NumBuffers);
+  SERIALISE_ELEMENT_ARRAY(pOffsets, NumBuffers);
 
-	SERIALISE_ELEMENT_ARR(uint32_t, Strides, pStrides, NumBuffers);
-	SERIALISE_ELEMENT_ARR(uint32_t, Offsets, pOffsets, NumBuffers);
-	
-	ID3D11Buffer *Buffers[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumBuffers; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppVertexBuffers[i]));
-		
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Buffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Buffers[i] = NULL;
-	}
-	
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->IA.VBs, Buffers, StartSlot, NumBuffers);
-	}
-	
-	for(UINT i=0; i < NumBuffers; i++)
-		if(m_State <= EXECUTING)
-			Buffers[i] = UNWRAP(WrappedID3D11Buffer, Buffers[i]);
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordVertexBindStats(NumBuffers, ppVertexBuffers);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.Strides, Strides, StartSlot, NumBuffers);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.Offsets, Offsets, StartSlot, NumBuffers);
-		m_pRealContext->IASetVertexBuffers(StartSlot, NumBuffers, Buffers, Strides, Offsets);
-		VerifyState();
-	}
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->IA.VBs, ppVertexBuffers,
+                                          StartSlot, NumBuffers);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.Strides, pStrides, StartSlot,
+                                   NumBuffers);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.Offsets, pOffsets, StartSlot,
+                                   NumBuffers);
 
-	SAFE_DELETE_ARRAY(Strides);
-	SAFE_DELETE_ARRAY(Offsets);
+    ID3D11Buffer *bufs[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT];
+    for(UINT i = 0; i < NumBuffers; i++)
+      bufs[i] = UNWRAP(WrappedID3D11Buffer, ppVertexBuffers[i]);
 
-	return true;
+    m_pRealContext->IASetVertexBuffers(StartSlot, NumBuffers, bufs, pStrides, pOffsets);
+    VerifyState();
+  }
+
+  return true;
 }
 
 void WrappedID3D11DeviceContext::IASetVertexBuffers(UINT StartSlot, UINT NumBuffers,
-													ID3D11Buffer *const *ppVertexBuffers, const UINT *pStrides, const UINT *pOffsets)
+                                                    ID3D11Buffer *const *ppVertexBuffers,
+                                                    const UINT *pStrides, const UINT *pOffsets)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_VBUFFER);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_IASetVertexBuffers(StartSlot, NumBuffers, ppVertexBuffers, pStrides, pOffsets);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->IA.VBs, ppVertexBuffers, StartSlot, NumBuffers);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.Strides, pStrides, StartSlot, NumBuffers);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.Offsets, pOffsets, StartSlot, NumBuffers);
-	
-	ID3D11Buffer *bufs[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT];
-	for(UINT i=0; i < NumBuffers; i++)
-	{
-		if(ppVertexBuffers[i] && m_State >= WRITING_CAPFRAME)
-			MarkResourceReferenced(GetIDForResource(ppVertexBuffers[i]), eFrameRef_Read);
-		bufs[i] = UNWRAP(WrappedID3D11Buffer, ppVertexBuffers[i]);
-	}
-	
-	m_pRealContext->IASetVertexBuffers(StartSlot, NumBuffers, bufs, pStrides, pOffsets);
-	VerifyState();
+  m_EmptyCommandList = false;
+
+  ID3D11Buffer *bufs[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT];
+  for(UINT i = 0; i < NumBuffers; i++)
+  {
+    if(ppVertexBuffers[i] && IsActiveCapturing(m_State))
+      MarkResourceReferenced(GetIDForDeviceChild(ppVertexBuffers[i]), eFrameRef_Read);
+    bufs[i] = UNWRAP(WrappedID3D11Buffer, ppVertexBuffers[i]);
+  }
+
+  SERIALISE_TIME_CALL(
+      m_pRealContext->IASetVertexBuffers(StartSlot, NumBuffers, bufs, pStrides, pOffsets));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::IASetVertexBuffers);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_IASetVertexBuffers(GET_SERIALISER, StartSlot, NumBuffers, ppVertexBuffers, pStrides,
+                                 pOffsets);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->IA.VBs, ppVertexBuffers, StartSlot,
+                                        NumBuffers);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.Strides, pStrides, StartSlot, NumBuffers);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.Offsets, pOffsets, StartSlot, NumBuffers);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_IASetIndexBuffer(ID3D11Buffer *pIndexBuffer, DXGI_FORMAT Format_, UINT Offset_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_IASetIndexBuffer(SerialiserType &ser,
+                                                            ID3D11Buffer *pIndexBuffer,
+                                                            DXGI_FORMAT Format, UINT Offset)
 {
-	SERIALISE_ELEMENT(ResourceId, Buffer, GetIDForResource(pIndexBuffer));
-	SERIALISE_ELEMENT(DXGI_FORMAT, Format, Format_);
-	SERIALISE_ELEMENT(uint32_t, Offset, Offset_);
-	
-	if(m_State <= EXECUTING)
-	{
-		pIndexBuffer = NULL;
-		if(m_pDevice->GetResourceManager()->HasLiveResource(Buffer))
-			pIndexBuffer = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetLiveResource(Buffer);
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->IA.IndexBuffer, pIndexBuffer);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.IndexFormat, Format);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.IndexOffset, Offset);
-		m_pRealContext->IASetIndexBuffer(UNWRAP(WrappedID3D11Buffer, pIndexBuffer), Format, Offset);
-		VerifyState();
-	}
+  SERIALISE_ELEMENT(pIndexBuffer);
+  SERIALISE_ELEMENT(Format);
+  SERIALISE_ELEMENT(Offset);
 
-	return true;
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordIndexBindStats(pIndexBuffer);
+
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->IA.IndexBuffer, pIndexBuffer);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.IndexFormat, Format);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.IndexOffset, Offset);
+    m_pRealContext->IASetIndexBuffer(UNWRAP(WrappedID3D11Buffer, pIndexBuffer), Format, Offset);
+    VerifyState();
+  }
+
+  return true;
 }
 
-void WrappedID3D11DeviceContext::IASetIndexBuffer(ID3D11Buffer *pIndexBuffer, DXGI_FORMAT Format, UINT Offset)
+void WrappedID3D11DeviceContext::IASetIndexBuffer(ID3D11Buffer *pIndexBuffer, DXGI_FORMAT Format,
+                                                  UINT Offset)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_IBUFFER);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_IASetIndexBuffer(pIndexBuffer, Format, Offset);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
+  m_EmptyCommandList = false;
 
-	if(pIndexBuffer && m_State >= WRITING_CAPFRAME)
-		MarkResourceReferenced(GetIDForResource(pIndexBuffer), eFrameRef_Read);
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->IA.IndexBuffer, pIndexBuffer);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.IndexFormat, Format);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.IndexOffset, Offset);
-	m_pRealContext->IASetIndexBuffer(UNWRAP(WrappedID3D11Buffer, pIndexBuffer), Format, Offset);
-	VerifyState();
+  SERIALISE_TIME_CALL(
+      m_pRealContext->IASetIndexBuffer(UNWRAP(WrappedID3D11Buffer, pIndexBuffer), Format, Offset));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::IASetIndexBuffer);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_IASetIndexBuffer(GET_SERIALISER, pIndexBuffer, Format, Offset);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  if(pIndexBuffer && IsActiveCapturing(m_State))
+    MarkResourceReferenced(GetIDForDeviceChild(pIndexBuffer), eFrameRef_Read);
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->IA.IndexBuffer, pIndexBuffer);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.IndexFormat, Format);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->IA.IndexOffset, Offset);
+  VerifyState();
 }
 
 #pragma endregion Input Assembly
 
 #pragma region Vertex Shader
 
-void WrappedID3D11DeviceContext::VSGetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D11Buffer **ppConstantBuffers)
+void WrappedID3D11DeviceContext::VSGetConstantBuffers(UINT StartSlot, UINT NumBuffers,
+                                                      ID3D11Buffer **ppConstantBuffers)
 {
-	if(ppConstantBuffers)
-	{
-		ID3D11Buffer *real[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
-		m_pRealContext->VSGetConstantBuffers(StartSlot, NumBuffers, real);
+  if(ppConstantBuffers)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		for(UINT i=0; i < NumBuffers; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppConstantBuffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppConstantBuffers[i]);
+    ID3D11Buffer *real[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
+    m_pRealContext->VSGetConstantBuffers(StartSlot, NumBuffers, real);
 
-			RDCASSERT(ppConstantBuffers[i] == m_CurrentPipelineState->VS.ConstantBuffers[i+StartSlot]);
-		}
-	}
+    for(UINT i = 0; i < NumBuffers; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppConstantBuffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppConstantBuffers[i]);
+
+      RDCASSERT(ppConstantBuffers[i] == m_CurrentPipelineState->VS.ConstantBuffers[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::VSGetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView **ppShaderResourceViews)
+void WrappedID3D11DeviceContext::VSGetShaderResources(UINT StartSlot, UINT NumViews,
+                                                      ID3D11ShaderResourceView **ppShaderResourceViews)
 {
-	if(ppShaderResourceViews)
-	{
-		ID3D11ShaderResourceView *real[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {0};
-		m_pRealContext->VSGetShaderResources(StartSlot, NumViews, real);
+  if(ppShaderResourceViews)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		for(UINT i=0; i < NumViews; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppShaderResourceViews[i] = (ID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppShaderResourceViews[i]);
+    ID3D11ShaderResourceView *real[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {0};
+    m_pRealContext->VSGetShaderResources(StartSlot, NumViews, real);
 
-			RDCASSERT(ppShaderResourceViews[i] == m_CurrentPipelineState->VS.SRVs[i+StartSlot]);
-		}
-	}
+    for(UINT i = 0; i < NumViews; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppShaderResourceViews[i] =
+          (ID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppShaderResourceViews[i]);
+
+      RDCASSERT(ppShaderResourceViews[i] == m_CurrentPipelineState->VS.SRVs[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::VSGetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState **ppSamplers)
+void WrappedID3D11DeviceContext::VSGetSamplers(UINT StartSlot, UINT NumSamplers,
+                                               ID3D11SamplerState **ppSamplers)
 {
-	if(ppSamplers)
-	{
-		ID3D11SamplerState *real[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {0};
-		m_pRealContext->VSGetSamplers(StartSlot, NumSamplers, real);
+  if(ppSamplers)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		for(UINT i=0; i < NumSamplers; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppSamplers[i] = (ID3D11SamplerState *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppSamplers[i]);
+    ID3D11SamplerState *real[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {0};
+    m_pRealContext->VSGetSamplers(StartSlot, NumSamplers, real);
 
-			RDCASSERT(ppSamplers[i] == m_CurrentPipelineState->VS.Samplers[i+StartSlot]);
-		}
-	}
+    for(UINT i = 0; i < NumSamplers; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppSamplers[i] = (ID3D11SamplerState *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppSamplers[i]);
+
+      RDCASSERT(ppSamplers[i] == m_CurrentPipelineState->VS.Samplers[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::VSGetShader(ID3D11VertexShader **ppVertexShader, ID3D11ClassInstance **ppClassInstances,
-												UINT *pNumClassInstances)
+void WrappedID3D11DeviceContext::VSGetShader(ID3D11VertexShader **ppVertexShader,
+                                             ID3D11ClassInstance **ppClassInstances,
+                                             UINT *pNumClassInstances)
 {
-	if(ppVertexShader == NULL && ppClassInstances == NULL && pNumClassInstances == NULL)
-		return;
-	
-	ID3D11ClassInstance *realInsts[D3D11_SHADER_MAX_INTERFACES] = {0};
-	UINT numInsts = 0;
-	ID3D11VertexShader *realShader = NULL;
-	m_pRealContext->VSGetShader(&realShader, realInsts, &numInsts);
-	
-	SAFE_RELEASE_NOCLEAR(realShader);
-	for(UINT i=0; i < numInsts; i++)
-		SAFE_RELEASE_NOCLEAR(realInsts[i]);
+  if(ppVertexShader == NULL && ppClassInstances == NULL && pNumClassInstances == NULL)
+    return;
 
-	if(ppVertexShader)
-	{
-		*ppVertexShader = (ID3D11VertexShader *)m_pDevice->GetResourceManager()->GetWrapper(realShader);
-		SAFE_ADDREF(*ppVertexShader);
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		RDCASSERT(*ppVertexShader == m_CurrentPipelineState->VS.Shader);
-	}
+  ID3D11ClassInstance *realInsts[D3D11_SHADER_MAX_INTERFACES] = {0};
+  UINT numInsts = 0;
+  ID3D11VertexShader *realShader = NULL;
+  m_pRealContext->VSGetShader(&realShader, realInsts, &numInsts);
 
-	if(ppClassInstances)
-	{
-		for(UINT i=0; i < numInsts; i++)
-		{
-			ppClassInstances[i] = (ID3D11ClassInstance *)m_pDevice->GetResourceManager()->GetWrapper(realInsts[i]);
-			SAFE_ADDREF(ppClassInstances[i]);
+  SAFE_RELEASE_NOCLEAR(realShader);
+  for(UINT i = 0; i < numInsts; i++)
+    SAFE_RELEASE_NOCLEAR(realInsts[i]);
 
-			RDCASSERT(ppClassInstances[i] == m_CurrentPipelineState->VS.Instances[i]);
-		}
-	}
+  if(ppVertexShader)
+  {
+    *ppVertexShader = (ID3D11VertexShader *)m_pDevice->GetResourceManager()->GetWrapper(realShader);
+    SAFE_ADDREF(*ppVertexShader);
 
-	if(pNumClassInstances)
-	{
-		*pNumClassInstances = numInsts;
-	}
+    RDCASSERT(*ppVertexShader == m_CurrentPipelineState->VS.Object);
+  }
+
+  if(ppClassInstances)
+  {
+    for(UINT i = 0; i < numInsts; i++)
+    {
+      ppClassInstances[i] =
+          (ID3D11ClassInstance *)m_pDevice->GetResourceManager()->GetWrapper(realInsts[i]);
+      SAFE_ADDREF(ppClassInstances[i]);
+
+      RDCASSERT(ppClassInstances[i] == m_CurrentPipelineState->VS.Instances[i]);
+    }
+  }
+
+  if(pNumClassInstances)
+  {
+    *pNumClassInstances = numInsts;
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_VSSetConstantBuffers(UINT StartSlot_, UINT NumBuffers_,
-												ID3D11Buffer *const *ppConstantBuffers)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_VSSetConstantBuffers(SerialiserType &ser, UINT StartSlot,
+                                                                UINT NumBuffers,
+                                                                ID3D11Buffer *const *ppConstantBuffers)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumBuffers, NumBuffers_);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumBuffers);
+  SERIALISE_ELEMENT_ARRAY(ppConstantBuffers, NumBuffers);
 
-	ID3D11Buffer *Buffers[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumBuffers; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppConstantBuffers[i]));
-		
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Buffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Buffers[i] = NULL;
-	}
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordConstantStats(ShaderStage::Vertex, NumBuffers, ppConstantBuffers);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.ConstantBuffers, Buffers, StartSlot, NumBuffers);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->VS.CBOffsets, NullCBOffsets, StartSlot, NumBuffers);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->VS.CBCounts, NullCBCounts, StartSlot, NumBuffers);
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.ConstantBuffers,
+                                          ppConstantBuffers, StartSlot, NumBuffers);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->VS.CBOffsets, NullCBOffsets, StartSlot,
+                                   NumBuffers);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->VS.CBCounts, NullCBCounts, StartSlot,
+                                   NumBuffers);
 
-		for(UINT i=0; i < NumBuffers; i++)
-			Buffers[i] = UNWRAP(WrappedID3D11Buffer, Buffers[i]);
+    ID3D11Buffer *bufs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
+    for(UINT i = 0; i < NumBuffers; i++)
+      bufs[i] = UNWRAP(WrappedID3D11Buffer, ppConstantBuffers[i]);
 
-		m_pRealContext->VSSetConstantBuffers(StartSlot, NumBuffers, Buffers);
-		VerifyState();
-	}
+    m_pRealContext->VSSetConstantBuffers(StartSlot, NumBuffers, bufs);
+    VerifyState();
+  }
 
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::VSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D11Buffer *const *ppConstantBuffers)
+void WrappedID3D11DeviceContext::VSSetConstantBuffers(UINT StartSlot, UINT NumBuffers,
+                                                      ID3D11Buffer *const *ppConstantBuffers)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_VS_CBUFFERS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_VSSetConstantBuffers(StartSlot, NumBuffers, ppConstantBuffers);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.ConstantBuffers, ppConstantBuffers, StartSlot, NumBuffers);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->VS.CBOffsets, NullCBOffsets, StartSlot, NumBuffers);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->VS.CBCounts, NullCBCounts, StartSlot, NumBuffers);
+  m_EmptyCommandList = false;
 
-	ID3D11Buffer *bufs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
-	for(UINT i=0; i < NumBuffers; i++)
-	{
-		if(ppConstantBuffers[i] && m_State >= WRITING_CAPFRAME)
-			MarkResourceReferenced(GetIDForResource(ppConstantBuffers[i]), eFrameRef_Read);
+  ID3D11Buffer *bufs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
+  for(UINT i = 0; i < NumBuffers; i++)
+  {
+    if(ppConstantBuffers[i] && IsActiveCapturing(m_State))
+      MarkResourceReferenced(GetIDForDeviceChild(ppConstantBuffers[i]), eFrameRef_Read);
 
-		bufs[i] = UNWRAP(WrappedID3D11Buffer, ppConstantBuffers[i]);
-	}
-	
-	m_pRealContext->VSSetConstantBuffers(StartSlot, NumBuffers, bufs);
-	VerifyState();
+    bufs[i] = UNWRAP(WrappedID3D11Buffer, ppConstantBuffers[i]);
+  }
+
+  SERIALISE_TIME_CALL(m_pRealContext->VSSetConstantBuffers(StartSlot, NumBuffers, bufs));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::VSSetConstantBuffers);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_VSSetConstantBuffers(GET_SERIALISER, StartSlot, NumBuffers, ppConstantBuffers);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.ConstantBuffers,
+                                        ppConstantBuffers, StartSlot, NumBuffers);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->VS.CBOffsets, NullCBOffsets, StartSlot,
+                                 NumBuffers);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->VS.CBCounts, NullCBCounts, StartSlot,
+                                 NumBuffers);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_VSSetShaderResources(UINT StartSlot_, UINT NumViews_, ID3D11ShaderResourceView *const *ppShaderResourceViews)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_VSSetShaderResources(
+    SerialiserType &ser, UINT StartSlot, UINT NumViews,
+    ID3D11ShaderResourceView *const *ppShaderResourceViews)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumViews, NumViews_);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumViews);
+  SERIALISE_ELEMENT_ARRAY(ppShaderResourceViews, NumViews);
 
-	ID3D11ShaderResourceView **Views = new ID3D11ShaderResourceView *[NumViews];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumViews; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppShaderResourceViews[i]));
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordResourceStats(ShaderStage::Vertex, NumViews, ppShaderResourceViews);
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Views[i] = (ID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Views[i] = NULL;
-	}
-	
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.SRVs, Views, StartSlot, NumViews);
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.SRVs, ppShaderResourceViews,
+                                          StartSlot, NumViews);
 
-		for(UINT i=0; i < NumViews; i++)
-			Views[i] = UNWRAP(WrappedID3D11ShaderResourceView, Views[i]);
+    ID3D11ShaderResourceView *SRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
+    for(UINT i = 0; i < NumViews; i++)
+      SRVs[i] = UNWRAP(WrappedID3D11ShaderResourceView1, ppShaderResourceViews[i]);
 
-		m_pRealContext->VSSetShaderResources(StartSlot, NumViews, Views);
-		VerifyState();
-	}
-	
-	SAFE_DELETE_ARRAY(Views);
+    m_pRealContext->VSSetShaderResources(StartSlot, NumViews, SRVs);
+    VerifyState();
+  }
 
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::VSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView *const *ppShaderResourceViews)
+void WrappedID3D11DeviceContext::VSSetShaderResources(
+    UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView *const *ppShaderResourceViews)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_VS_RESOURCES);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_VSSetShaderResources(StartSlot, NumViews, ppShaderResourceViews);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.SRVs, ppShaderResourceViews, StartSlot, NumViews);
-	
-	ID3D11ShaderResourceView *SRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
-	for(UINT i=0; i < NumViews; i++)
-	{
-		if(ppShaderResourceViews[i] && m_State >= WRITING_CAPFRAME)
-		{
-			ID3D11Resource *res = NULL;
-			ppShaderResourceViews[i]->GetResource(&res);
-			MarkResourceReferenced(GetIDForResource(ppShaderResourceViews[i]), eFrameRef_Read);
-			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
-			SAFE_RELEASE(res);
-		}
+  m_EmptyCommandList = false;
 
-		SRVs[i] = UNWRAP(WrappedID3D11ShaderResourceView, ppShaderResourceViews[i]);
-	}
+  ID3D11ShaderResourceView *SRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
+  for(UINT i = 0; i < NumViews; i++)
+  {
+    if(ppShaderResourceViews[i] && IsActiveCapturing(m_State))
+    {
+      MarkResourceReferenced(GetIDForDeviceChild(ppShaderResourceViews[i]), eFrameRef_Read);
+      MarkResourceReferenced(GetViewResourceResID(ppShaderResourceViews[i]), eFrameRef_Read);
+    }
 
-	m_pRealContext->VSSetShaderResources(StartSlot, NumViews, SRVs);
-	VerifyState();
+    SRVs[i] = UNWRAP(WrappedID3D11ShaderResourceView1, ppShaderResourceViews[i]);
+  }
+
+  SERIALISE_TIME_CALL(m_pRealContext->VSSetShaderResources(StartSlot, NumViews, SRVs));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::VSSetShaderResources);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_VSSetShaderResources(GET_SERIALISER, StartSlot, NumViews, ppShaderResourceViews);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.SRVs, ppShaderResourceViews,
+                                        StartSlot, NumViews);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_VSSetSamplers(UINT StartSlot_, UINT NumSamplers_, ID3D11SamplerState *const *ppSamplers)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_VSSetSamplers(SerialiserType &ser, UINT StartSlot,
+                                                         UINT NumSamplers,
+                                                         ID3D11SamplerState *const *ppSamplers)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumSamplers, NumSamplers_);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumSamplers);
+  SERIALISE_ELEMENT_ARRAY(ppSamplers, NumSamplers);
 
-	ID3D11SamplerState **Sampler = new ID3D11SamplerState *[NumSamplers];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumSamplers; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppSamplers[i]));
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordSamplerStats(ShaderStage::Vertex, NumSamplers, ppSamplers);
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Sampler[i] = (ID3D11SamplerState *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Sampler[i] = NULL;
-	}
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.Samplers, ppSamplers,
+                                          StartSlot, NumSamplers);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.Samplers, Sampler, StartSlot, NumSamplers);
+    ID3D11SamplerState *samps[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
+    for(UINT i = 0; i < NumSamplers; i++)
+      samps[i] = UNWRAP(WrappedID3D11SamplerState, ppSamplers[i]);
 
-		for(UINT i=0; i < NumSamplers; i++)
-			Sampler[i] = UNWRAP(WrappedID3D11SamplerState, Sampler[i]);
+    m_pRealContext->VSSetSamplers(StartSlot, NumSamplers, samps);
+    VerifyState();
+  }
 
-		m_pRealContext->VSSetSamplers(StartSlot, NumSamplers, Sampler);
-		VerifyState();
-	}
-		
-	SAFE_DELETE_ARRAY(Sampler);
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::VSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState *const *ppSamplers)
+void WrappedID3D11DeviceContext::VSSetSamplers(UINT StartSlot, UINT NumSamplers,
+                                               ID3D11SamplerState *const *ppSamplers)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_VS_SAMPLERS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_VSSetSamplers(StartSlot, NumSamplers, ppSamplers);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.Samplers, ppSamplers, StartSlot, NumSamplers);
-	
-	ID3D11SamplerState *samps[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
-	for(UINT i=0; i < NumSamplers; i++)
-		samps[i] = UNWRAP(WrappedID3D11SamplerState, ppSamplers[i]);
+  m_EmptyCommandList = false;
 
-	m_pRealContext->VSSetSamplers(StartSlot, NumSamplers, samps);
-	VerifyState();
+  ID3D11SamplerState *samps[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
+  for(UINT i = 0; i < NumSamplers; i++)
+  {
+    if(ppSamplers[i] && IsActiveCapturing(m_State))
+      MarkResourceReferenced(GetIDForDeviceChild(ppSamplers[i]), eFrameRef_Read);
+
+    samps[i] = UNWRAP(WrappedID3D11SamplerState, ppSamplers[i]);
+  }
+
+  SERIALISE_TIME_CALL(m_pRealContext->VSSetSamplers(StartSlot, NumSamplers, samps));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::VSSetSamplers);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_VSSetSamplers(GET_SERIALISER, StartSlot, NumSamplers, ppSamplers);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.Samplers, ppSamplers, StartSlot,
+                                        NumSamplers);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_VSSetShader(ID3D11VertexShader *pShader, ID3D11ClassInstance *const *ppClassInstances,
-														UINT NumClassInstances_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_VSSetShader(SerialiserType &ser,
+                                                       ID3D11VertexShader *pShader,
+                                                       ID3D11ClassInstance *const *ppClassInstances,
+                                                       UINT NumClassInstances)
 {
-	SERIALISE_ELEMENT(ResourceId, Shader, GetIDForResource(pShader));
-	SERIALISE_ELEMENT(uint32_t, NumClassInstances, NumClassInstances_);
-	
-	ID3D11ClassInstance **Instances = new ID3D11ClassInstance *[NumClassInstances];
+  SERIALISE_ELEMENT(pShader);
+  SERIALISE_ELEMENT_ARRAY(ppClassInstances, NumClassInstances);
+  SERIALISE_ELEMENT(NumClassInstances);
 
-	for(UINT i=0; i < NumClassInstances; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppClassInstances[i]));
+  SERIALISE_CHECK_READ_ERRORS();
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Instances[i] = (ID3D11ClassInstance *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Instances[i] = NULL;
-	}
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordShaderStats(ShaderStage::Vertex, m_CurrentPipelineState->VS.Object, pShader);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.Instances, Instances, 0, NumClassInstances);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->VS.NumInstances, NumClassInstances);
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.Instances, ppClassInstances, 0,
+                                          NumClassInstances);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->VS.NumInstances, NumClassInstances);
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.Object,
+                                          (ID3D11DeviceChild *)pShader);
 
-		for(UINT i=0; i < NumClassInstances; i++)
-			Instances[i] = UNWRAP(WrappedID3D11ClassInstance, Instances[i]);
+    ID3D11ClassInstance *insts[D3D11_SHADER_MAX_INTERFACES] = {0};
+    for(UINT i = 0; i < NumClassInstances; i++)
+      insts[i] = UNWRAP(WrappedID3D11ClassInstance, ppClassInstances[i]);
 
-		ID3D11DeviceChild *pSH = NULL;
-		if(m_pDevice->GetResourceManager()->HasLiveResource(Shader))
-			pSH = (ID3D11DeviceChild *)m_pDevice->GetResourceManager()->GetLiveResource(Shader);
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.Shader, pSH);
-		m_pRealContext->VSSetShader(UNWRAP(WrappedID3D11Shader<ID3D11VertexShader>, pSH), Instances, NumClassInstances);
-		VerifyState();
-	}
+    m_pRealContext->VSSetShader(UNWRAP(WrappedID3D11Shader<ID3D11VertexShader>, pShader), insts,
+                                NumClassInstances);
+    VerifyState();
+  }
 
-	SAFE_DELETE_ARRAY(Instances);
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::VSSetShader(ID3D11VertexShader *pVertexShader, ID3D11ClassInstance *const *ppClassInstances, UINT NumClassInstances)
+void WrappedID3D11DeviceContext::VSSetShader(ID3D11VertexShader *pVertexShader,
+                                             ID3D11ClassInstance *const *ppClassInstances,
+                                             UINT NumClassInstances)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_VS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_VSSetShader(pVertexShader, ppClassInstances, NumClassInstances);
-		
-		MarkResourceReferenced(GetIDForResource(pVertexShader), eFrameRef_Read);
+  m_EmptyCommandList = false;
 
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.Shader, (ID3D11DeviceChild *)pVertexShader);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->VS.NumInstances, NumClassInstances);
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.Instances, ppClassInstances, 0, NumClassInstances);
-	
-	ID3D11ClassInstance *insts[D3D11_SHADER_MAX_INTERFACES] = {0};
-	if(ppClassInstances && NumClassInstances > 0)
-		for(UINT i=0; i < NumClassInstances; i++)
-			insts[i] = UNWRAP(WrappedID3D11ClassInstance, ppClassInstances[i]);
-	
-	m_pRealContext->VSSetShader(UNWRAP(WrappedID3D11Shader<ID3D11VertexShader>, pVertexShader), insts, NumClassInstances);
-	VerifyState();
+  ID3D11ClassInstance *insts[D3D11_SHADER_MAX_INTERFACES] = {0};
+  if(ppClassInstances && NumClassInstances > 0)
+    for(UINT i = 0; i < NumClassInstances; i++)
+      insts[i] = UNWRAP(WrappedID3D11ClassInstance, ppClassInstances[i]);
+
+  SERIALISE_TIME_CALL(m_pRealContext->VSSetShader(
+      UNWRAP(WrappedID3D11Shader<ID3D11VertexShader>, pVertexShader), insts, NumClassInstances));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::VSSetShader);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_VSSetShader(GET_SERIALISER, pVertexShader, ppClassInstances, NumClassInstances);
+
+    MarkResourceReferenced(GetIDForDeviceChild(pVertexShader), eFrameRef_Read);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.Object,
+                                        (ID3D11DeviceChild *)pVertexShader);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->VS.NumInstances, NumClassInstances);
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->VS.Instances, ppClassInstances, 0,
+                                        NumClassInstances);
+
+  VerifyState();
 }
 
 #pragma endregion Vertex Shader
 
 #pragma region Hull Shader
 
-void WrappedID3D11DeviceContext::HSGetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D11Buffer **ppConstantBuffers)
+void WrappedID3D11DeviceContext::HSGetConstantBuffers(UINT StartSlot, UINT NumBuffers,
+                                                      ID3D11Buffer **ppConstantBuffers)
 {
-	if(ppConstantBuffers)
-	{
-		ID3D11Buffer *real[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
-		m_pRealContext->HSGetConstantBuffers(StartSlot, NumBuffers, real);
-	
-		for(UINT i=0; i < NumBuffers; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppConstantBuffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppConstantBuffers[i]);
+  if(ppConstantBuffers)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-			RDCASSERT(ppConstantBuffers[i] == m_CurrentPipelineState->HS.ConstantBuffers[i+StartSlot]);
-		}
-	}
+    ID3D11Buffer *real[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
+    m_pRealContext->HSGetConstantBuffers(StartSlot, NumBuffers, real);
+
+    for(UINT i = 0; i < NumBuffers; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppConstantBuffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppConstantBuffers[i]);
+
+      RDCASSERT(ppConstantBuffers[i] == m_CurrentPipelineState->HS.ConstantBuffers[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::HSGetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView **ppShaderResourceViews)
+void WrappedID3D11DeviceContext::HSGetShaderResources(UINT StartSlot, UINT NumViews,
+                                                      ID3D11ShaderResourceView **ppShaderResourceViews)
 {
-	if(ppShaderResourceViews)
-	{
-		ID3D11ShaderResourceView *real[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {0};
-		m_pRealContext->HSGetShaderResources(StartSlot, NumViews, real);
+  if(ppShaderResourceViews)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		for(UINT i=0; i < NumViews; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppShaderResourceViews[i] = (ID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppShaderResourceViews[i]);
+    ID3D11ShaderResourceView *real[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {0};
+    m_pRealContext->HSGetShaderResources(StartSlot, NumViews, real);
 
-			RDCASSERT(ppShaderResourceViews[i] == m_CurrentPipelineState->HS.SRVs[i+StartSlot]);
-		}
-	}
+    for(UINT i = 0; i < NumViews; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppShaderResourceViews[i] =
+          (ID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppShaderResourceViews[i]);
+
+      RDCASSERT(ppShaderResourceViews[i] == m_CurrentPipelineState->HS.SRVs[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::HSGetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState **ppSamplers)
+void WrappedID3D11DeviceContext::HSGetSamplers(UINT StartSlot, UINT NumSamplers,
+                                               ID3D11SamplerState **ppSamplers)
 {
-	if(ppSamplers)
-	{
-		ID3D11SamplerState *real[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {0};
-		m_pRealContext->HSGetSamplers(StartSlot, NumSamplers, real);
+  if(ppSamplers)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		for(UINT i=0; i < NumSamplers; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppSamplers[i] = (ID3D11SamplerState *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppSamplers[i]);
+    ID3D11SamplerState *real[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {0};
+    m_pRealContext->HSGetSamplers(StartSlot, NumSamplers, real);
 
-			RDCASSERT(ppSamplers[i] == m_CurrentPipelineState->HS.Samplers[i+StartSlot]);
-		}
-	}
+    for(UINT i = 0; i < NumSamplers; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppSamplers[i] = (ID3D11SamplerState *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppSamplers[i]);
+
+      RDCASSERT(ppSamplers[i] == m_CurrentPipelineState->HS.Samplers[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::HSGetShader(ID3D11HullShader **ppHullShader, ID3D11ClassInstance **ppClassInstances, UINT *pNumClassInstances)
+void WrappedID3D11DeviceContext::HSGetShader(ID3D11HullShader **ppHullShader,
+                                             ID3D11ClassInstance **ppClassInstances,
+                                             UINT *pNumClassInstances)
 {
-	if(ppHullShader == NULL && ppClassInstances == NULL && pNumClassInstances == NULL)
-		return;
-	
-	ID3D11ClassInstance *realInsts[D3D11_SHADER_MAX_INTERFACES] = {0};
-	UINT numInsts = 0;
-	ID3D11HullShader *realShader = NULL;
-	m_pRealContext->HSGetShader(&realShader, realInsts, &numInsts);
-	
-	SAFE_RELEASE_NOCLEAR(realShader);
-	for(UINT i=0; i < numInsts; i++)
-		SAFE_RELEASE_NOCLEAR(realInsts[i]);
+  if(ppHullShader == NULL && ppClassInstances == NULL && pNumClassInstances == NULL)
+    return;
 
-	if(ppHullShader)
-	{
-		*ppHullShader = (ID3D11HullShader *)m_pDevice->GetResourceManager()->GetWrapper(realShader);
-		SAFE_ADDREF(*ppHullShader);
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		RDCASSERT(*ppHullShader == m_CurrentPipelineState->HS.Shader);
-	}
+  ID3D11ClassInstance *realInsts[D3D11_SHADER_MAX_INTERFACES] = {0};
+  UINT numInsts = 0;
+  ID3D11HullShader *realShader = NULL;
+  m_pRealContext->HSGetShader(&realShader, realInsts, &numInsts);
 
-	if(ppClassInstances)
-	{
-		for(UINT i=0; i < numInsts; i++)
-		{
-			ppClassInstances[i] = (ID3D11ClassInstance *)m_pDevice->GetResourceManager()->GetWrapper(realInsts[i]);
-			SAFE_ADDREF(ppClassInstances[i]);
+  SAFE_RELEASE_NOCLEAR(realShader);
+  for(UINT i = 0; i < numInsts; i++)
+    SAFE_RELEASE_NOCLEAR(realInsts[i]);
 
-			RDCASSERT(ppClassInstances[i] == m_CurrentPipelineState->HS.Instances[i]);
-		}
-	}
+  if(ppHullShader)
+  {
+    *ppHullShader = (ID3D11HullShader *)m_pDevice->GetResourceManager()->GetWrapper(realShader);
+    SAFE_ADDREF(*ppHullShader);
 
-	if(pNumClassInstances)
-	{
-		*pNumClassInstances = numInsts;
-	}
+    RDCASSERT(*ppHullShader == m_CurrentPipelineState->HS.Object);
+  }
+
+  if(ppClassInstances)
+  {
+    for(UINT i = 0; i < numInsts; i++)
+    {
+      ppClassInstances[i] =
+          (ID3D11ClassInstance *)m_pDevice->GetResourceManager()->GetWrapper(realInsts[i]);
+      SAFE_ADDREF(ppClassInstances[i]);
+
+      RDCASSERT(ppClassInstances[i] == m_CurrentPipelineState->HS.Instances[i]);
+    }
+  }
+
+  if(pNumClassInstances)
+  {
+    *pNumClassInstances = numInsts;
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_HSSetConstantBuffers(UINT StartSlot_, UINT NumBuffers_,
-												ID3D11Buffer *const *ppConstantBuffers)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_HSSetConstantBuffers(SerialiserType &ser, UINT StartSlot,
+                                                                UINT NumBuffers,
+                                                                ID3D11Buffer *const *ppConstantBuffers)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumBuffers, NumBuffers_);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumBuffers);
+  SERIALISE_ELEMENT_ARRAY(ppConstantBuffers, NumBuffers);
 
-	ID3D11Buffer **Buffers = new ID3D11Buffer *[NumBuffers];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumBuffers; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppConstantBuffers[i]));
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordConstantStats(ShaderStage::Hull, NumBuffers, ppConstantBuffers);
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Buffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Buffers[i] = NULL;
-	}
-	
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.ConstantBuffers, Buffers, StartSlot, NumBuffers);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->HS.CBOffsets, NullCBOffsets, StartSlot, NumBuffers);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->HS.CBCounts, NullCBCounts, StartSlot, NumBuffers);
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.ConstantBuffers,
+                                          ppConstantBuffers, StartSlot, NumBuffers);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->HS.CBOffsets, NullCBOffsets, StartSlot,
+                                   NumBuffers);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->HS.CBCounts, NullCBCounts, StartSlot,
+                                   NumBuffers);
 
-		for(UINT i=0; i < NumBuffers; i++)
-			Buffers[i] = UNWRAP(WrappedID3D11Buffer, Buffers[i]);
+    ID3D11Buffer *bufs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
+    for(UINT i = 0; i < NumBuffers; i++)
+      bufs[i] = UNWRAP(WrappedID3D11Buffer, ppConstantBuffers[i]);
 
-		if(m_State <= EXECUTING)
-			m_pRealContext->HSSetConstantBuffers(StartSlot, NumBuffers, Buffers);
-		VerifyState();
-	}
+    m_pRealContext->HSSetConstantBuffers(StartSlot, NumBuffers, bufs);
+    VerifyState();
+  }
 
-	SAFE_DELETE_ARRAY(Buffers);
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::HSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D11Buffer *const *ppConstantBuffers)
+void WrappedID3D11DeviceContext::HSSetConstantBuffers(UINT StartSlot, UINT NumBuffers,
+                                                      ID3D11Buffer *const *ppConstantBuffers)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_HS_CBUFFERS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_HSSetConstantBuffers(StartSlot, NumBuffers, ppConstantBuffers);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.ConstantBuffers, ppConstantBuffers, StartSlot, NumBuffers);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->HS.CBOffsets, NullCBOffsets, StartSlot, NumBuffers);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->HS.CBCounts, NullCBCounts, StartSlot, NumBuffers);
+  m_EmptyCommandList = false;
 
-	ID3D11Buffer *bufs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
-	for(UINT i=0; i < NumBuffers; i++)
-	{
-		if(ppConstantBuffers[i] && m_State >= WRITING_CAPFRAME)
-			MarkResourceReferenced(GetIDForResource(ppConstantBuffers[i]), eFrameRef_Read);
+  ID3D11Buffer *bufs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
+  for(UINT i = 0; i < NumBuffers; i++)
+  {
+    if(ppConstantBuffers[i] && IsActiveCapturing(m_State))
+      MarkResourceReferenced(GetIDForDeviceChild(ppConstantBuffers[i]), eFrameRef_Read);
 
-		bufs[i] = UNWRAP(WrappedID3D11Buffer, ppConstantBuffers[i]);
-	}
-	
-	m_pRealContext->HSSetConstantBuffers(StartSlot, NumBuffers, bufs);
-	VerifyState();
+    bufs[i] = UNWRAP(WrappedID3D11Buffer, ppConstantBuffers[i]);
+  }
+
+  SERIALISE_TIME_CALL(m_pRealContext->HSSetConstantBuffers(StartSlot, NumBuffers, bufs));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::HSSetConstantBuffers);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_HSSetConstantBuffers(GET_SERIALISER, StartSlot, NumBuffers, ppConstantBuffers);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.ConstantBuffers,
+                                        ppConstantBuffers, StartSlot, NumBuffers);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->HS.CBOffsets, NullCBOffsets, StartSlot,
+                                 NumBuffers);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->HS.CBCounts, NullCBCounts, StartSlot,
+                                 NumBuffers);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_HSSetShaderResources(UINT StartSlot_, UINT NumViews_, ID3D11ShaderResourceView *const *ppShaderResourceViews)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_HSSetShaderResources(
+    SerialiserType &ser, UINT StartSlot, UINT NumViews,
+    ID3D11ShaderResourceView *const *ppShaderResourceViews)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumViews, NumViews_);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumViews);
+  SERIALISE_ELEMENT_ARRAY(ppShaderResourceViews, NumViews);
 
-	ID3D11ShaderResourceView **Views = new ID3D11ShaderResourceView *[NumViews];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumViews; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppShaderResourceViews[i]));
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordResourceStats(ShaderStage::Hull, NumViews, ppShaderResourceViews);
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Views[i] = (ID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Views[i] = NULL;
-	}
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.SRVs, ppShaderResourceViews,
+                                          StartSlot, NumViews);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.SRVs, Views, StartSlot, NumViews);
+    ID3D11ShaderResourceView *SRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
+    for(UINT i = 0; i < NumViews; i++)
+      SRVs[i] = UNWRAP(WrappedID3D11ShaderResourceView1, ppShaderResourceViews[i]);
 
-		for(UINT i=0; i < NumViews; i++)
-			Views[i] = UNWRAP(WrappedID3D11ShaderResourceView, Views[i]);
+    m_pRealContext->HSSetShaderResources(StartSlot, NumViews, SRVs);
+    VerifyState();
+  }
 
-		m_pRealContext->HSSetShaderResources(StartSlot, NumViews, Views);
-		VerifyState();
-	}
-	
-	SAFE_DELETE_ARRAY(Views);
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::HSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView *const *ppShaderResourceViews)
+void WrappedID3D11DeviceContext::HSSetShaderResources(
+    UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView *const *ppShaderResourceViews)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_HS_RESOURCES);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_HSSetShaderResources(StartSlot, NumViews, ppShaderResourceViews);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.SRVs, ppShaderResourceViews, StartSlot, NumViews);
-	
-	ID3D11ShaderResourceView *SRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
-	for(UINT i=0; i < NumViews; i++)
-	{
-		if(ppShaderResourceViews[i] && m_State >= WRITING_CAPFRAME)
-		{
-			ID3D11Resource *res = NULL;
-			ppShaderResourceViews[i]->GetResource(&res);
-			MarkResourceReferenced(GetIDForResource(ppShaderResourceViews[i]), eFrameRef_Read);
-			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
-			SAFE_RELEASE(res);
-		}
+  m_EmptyCommandList = false;
 
-		SRVs[i] = UNWRAP(WrappedID3D11ShaderResourceView, ppShaderResourceViews[i]);
-	}
+  ID3D11ShaderResourceView *SRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
+  for(UINT i = 0; i < NumViews; i++)
+  {
+    if(ppShaderResourceViews[i] && IsActiveCapturing(m_State))
+    {
+      MarkResourceReferenced(GetIDForDeviceChild(ppShaderResourceViews[i]), eFrameRef_Read);
+      MarkResourceReferenced(GetViewResourceResID(ppShaderResourceViews[i]), eFrameRef_Read);
+    }
 
-	m_pRealContext->HSSetShaderResources(StartSlot, NumViews, SRVs);
-	VerifyState();
+    SRVs[i] = UNWRAP(WrappedID3D11ShaderResourceView1, ppShaderResourceViews[i]);
+  }
+
+  SERIALISE_TIME_CALL(m_pRealContext->HSSetShaderResources(StartSlot, NumViews, SRVs));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::HSSetShaderResources);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_HSSetShaderResources(GET_SERIALISER, StartSlot, NumViews, ppShaderResourceViews);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.SRVs, ppShaderResourceViews,
+                                        StartSlot, NumViews);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_HSSetSamplers(UINT StartSlot_, UINT NumSamplers_, ID3D11SamplerState *const *ppSamplers)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_HSSetSamplers(SerialiserType &ser, UINT StartSlot,
+                                                         UINT NumSamplers,
+                                                         ID3D11SamplerState *const *ppSamplers)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumSamplers, NumSamplers_);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumSamplers);
+  SERIALISE_ELEMENT_ARRAY(ppSamplers, NumSamplers);
 
-	ID3D11SamplerState **Sampler = new ID3D11SamplerState *[NumSamplers];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumSamplers; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppSamplers[i]));
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordSamplerStats(ShaderStage::Hull, NumSamplers, ppSamplers);
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Sampler[i] = (ID3D11SamplerState *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Sampler[i] = NULL;
-	}
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.Samplers, ppSamplers,
+                                          StartSlot, NumSamplers);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.Samplers, Sampler, StartSlot, NumSamplers);
+    ID3D11SamplerState *samps[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
+    for(UINT i = 0; i < NumSamplers; i++)
+      samps[i] = UNWRAP(WrappedID3D11SamplerState, ppSamplers[i]);
 
-		for(UINT i=0; i < NumSamplers; i++)
-			Sampler[i] = UNWRAP(WrappedID3D11SamplerState, Sampler[i]);
+    m_pRealContext->HSSetSamplers(StartSlot, NumSamplers, samps);
+    VerifyState();
+  }
 
-		m_pRealContext->HSSetSamplers(StartSlot, NumSamplers, Sampler);
-		VerifyState();
-	}
-		
-	SAFE_DELETE_ARRAY(Sampler);
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::HSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState *const *ppSamplers)
+void WrappedID3D11DeviceContext::HSSetSamplers(UINT StartSlot, UINT NumSamplers,
+                                               ID3D11SamplerState *const *ppSamplers)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_HS_SAMPLERS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_HSSetSamplers(StartSlot, NumSamplers, ppSamplers);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.Samplers, ppSamplers, StartSlot, NumSamplers);
-	
-	ID3D11SamplerState *samps[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
-	for(UINT i=0; i < NumSamplers; i++)
-		samps[i] = UNWRAP(WrappedID3D11SamplerState, ppSamplers[i]);
+  m_EmptyCommandList = false;
 
-	m_pRealContext->HSSetSamplers(StartSlot, NumSamplers, samps);
-	VerifyState();
+  ID3D11SamplerState *samps[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
+  for(UINT i = 0; i < NumSamplers; i++)
+  {
+    if(ppSamplers[i] && IsActiveCapturing(m_State))
+      MarkResourceReferenced(GetIDForDeviceChild(ppSamplers[i]), eFrameRef_Read);
+
+    samps[i] = UNWRAP(WrappedID3D11SamplerState, ppSamplers[i]);
+  }
+
+  SERIALISE_TIME_CALL(m_pRealContext->HSSetSamplers(StartSlot, NumSamplers, samps));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::HSSetSamplers);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_HSSetSamplers(GET_SERIALISER, StartSlot, NumSamplers, ppSamplers);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.Samplers, ppSamplers, StartSlot,
+                                        NumSamplers);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_HSSetShader(ID3D11HullShader *pShader, ID3D11ClassInstance *const *ppClassInstances,
-														UINT NumClassInstances_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_HSSetShader(SerialiserType &ser, ID3D11HullShader *pShader,
+                                                       ID3D11ClassInstance *const *ppClassInstances,
+                                                       UINT NumClassInstances)
 {
-	SERIALISE_ELEMENT(ResourceId, Shader, GetIDForResource(pShader));
-	SERIALISE_ELEMENT(uint32_t, NumClassInstances, NumClassInstances_);
-	
-	ID3D11ClassInstance **Instances = new ID3D11ClassInstance *[NumClassInstances];
+  SERIALISE_ELEMENT(pShader);
+  SERIALISE_ELEMENT_ARRAY(ppClassInstances, NumClassInstances);
+  SERIALISE_ELEMENT(NumClassInstances);
 
-	for(UINT i=0; i < NumClassInstances; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppClassInstances[i]));
+  SERIALISE_CHECK_READ_ERRORS();
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Instances[i] = (ID3D11ClassInstance *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Instances[i] = NULL;
-	}
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordShaderStats(ShaderStage::Hull, m_CurrentPipelineState->HS.Object, pShader);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.Instances, Instances, 0, NumClassInstances);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->HS.NumInstances, NumClassInstances);
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.Instances, ppClassInstances, 0,
+                                          NumClassInstances);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->HS.NumInstances, NumClassInstances);
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.Object,
+                                          (ID3D11DeviceChild *)pShader);
 
-		for(UINT i=0; i < NumClassInstances; i++)
-			Instances[i] = UNWRAP(WrappedID3D11ClassInstance, Instances[i]);
+    ID3D11ClassInstance *insts[D3D11_SHADER_MAX_INTERFACES] = {0};
+    for(UINT i = 0; i < NumClassInstances; i++)
+      insts[i] = UNWRAP(WrappedID3D11ClassInstance, ppClassInstances[i]);
 
-		ID3D11DeviceChild *pSH = NULL;
-		if(m_pDevice->GetResourceManager()->HasLiveResource(Shader))
-			pSH = (ID3D11DeviceChild *)m_pDevice->GetResourceManager()->GetLiveResource(Shader);
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.Shader, pSH);
-		m_pRealContext->HSSetShader(UNWRAP(WrappedID3D11Shader<ID3D11HullShader>, pSH), Instances, NumClassInstances);
-		VerifyState();
-	}
+    m_pRealContext->HSSetShader(UNWRAP(WrappedID3D11Shader<ID3D11HullShader>, pShader), insts,
+                                NumClassInstances);
+    VerifyState();
+  }
 
-	SAFE_DELETE_ARRAY(Instances);
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::HSSetShader(ID3D11HullShader *pHullShader, ID3D11ClassInstance *const *ppClassInstances, UINT NumClassInstances)
+void WrappedID3D11DeviceContext::HSSetShader(ID3D11HullShader *pHullShader,
+                                             ID3D11ClassInstance *const *ppClassInstances,
+                                             UINT NumClassInstances)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_HS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_HSSetShader(pHullShader, ppClassInstances, NumClassInstances);
-		
-		MarkResourceReferenced(GetIDForResource(pHullShader), eFrameRef_Read);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.Shader, (ID3D11DeviceChild *)pHullShader);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->HS.NumInstances, NumClassInstances);
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.Instances, ppClassInstances, 0, NumClassInstances);
-	
-	ID3D11ClassInstance *insts[D3D11_SHADER_MAX_INTERFACES] = {0};
-	if(ppClassInstances && NumClassInstances > 0)
-		for(UINT i=0; i < NumClassInstances; i++)
-			insts[i] = UNWRAP(WrappedID3D11ClassInstance, ppClassInstances[i]);
-	
-	m_pRealContext->HSSetShader(UNWRAP(WrappedID3D11Shader<ID3D11HullShader>, pHullShader), insts, NumClassInstances);
-	VerifyState();
+  m_EmptyCommandList = false;
+
+  ID3D11ClassInstance *insts[D3D11_SHADER_MAX_INTERFACES] = {0};
+  if(ppClassInstances && NumClassInstances > 0)
+    for(UINT i = 0; i < NumClassInstances; i++)
+      insts[i] = UNWRAP(WrappedID3D11ClassInstance, ppClassInstances[i]);
+
+  SERIALISE_TIME_CALL(m_pRealContext->HSSetShader(
+      UNWRAP(WrappedID3D11Shader<ID3D11HullShader>, pHullShader), insts, NumClassInstances));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::HSSetShader);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_HSSetShader(GET_SERIALISER, pHullShader, ppClassInstances, NumClassInstances);
+
+    MarkResourceReferenced(GetIDForDeviceChild(pHullShader), eFrameRef_Read);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.Object,
+                                        (ID3D11DeviceChild *)pHullShader);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->HS.NumInstances, NumClassInstances);
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->HS.Instances, ppClassInstances, 0,
+                                        NumClassInstances);
+
+  VerifyState();
 }
 
 #pragma endregion Hull Shader
 
 #pragma region Domain Shader
 
-void WrappedID3D11DeviceContext::DSGetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D11Buffer **ppConstantBuffers)
+void WrappedID3D11DeviceContext::DSGetConstantBuffers(UINT StartSlot, UINT NumBuffers,
+                                                      ID3D11Buffer **ppConstantBuffers)
 {
-	if(ppConstantBuffers)
-	{
-		ID3D11Buffer *real[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
-		m_pRealContext->DSGetConstantBuffers(StartSlot, NumBuffers, real);
+  if(ppConstantBuffers)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		for(UINT i=0; i < NumBuffers; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppConstantBuffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppConstantBuffers[i]);
+    ID3D11Buffer *real[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
+    m_pRealContext->DSGetConstantBuffers(StartSlot, NumBuffers, real);
 
-			RDCASSERT(ppConstantBuffers[i] == m_CurrentPipelineState->DS.ConstantBuffers[i+StartSlot]);
-		}
-	}
+    for(UINT i = 0; i < NumBuffers; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppConstantBuffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppConstantBuffers[i]);
+
+      RDCASSERT(ppConstantBuffers[i] == m_CurrentPipelineState->DS.ConstantBuffers[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::DSGetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView **ppShaderResourceViews)
+void WrappedID3D11DeviceContext::DSGetShaderResources(UINT StartSlot, UINT NumViews,
+                                                      ID3D11ShaderResourceView **ppShaderResourceViews)
 {
-	if(ppShaderResourceViews)
-	{
-		ID3D11ShaderResourceView *real[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {0};
-		m_pRealContext->DSGetShaderResources(StartSlot, NumViews, real);
+  if(ppShaderResourceViews)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		for(UINT i=0; i < NumViews; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppShaderResourceViews[i] = (ID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppShaderResourceViews[i]);
+    ID3D11ShaderResourceView *real[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {0};
+    m_pRealContext->DSGetShaderResources(StartSlot, NumViews, real);
 
-			RDCASSERT(ppShaderResourceViews[i] == m_CurrentPipelineState->DS.SRVs[i+StartSlot]);
-		}
-	}
+    for(UINT i = 0; i < NumViews; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppShaderResourceViews[i] =
+          (ID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppShaderResourceViews[i]);
+
+      RDCASSERT(ppShaderResourceViews[i] == m_CurrentPipelineState->DS.SRVs[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::DSGetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState **ppSamplers)
+void WrappedID3D11DeviceContext::DSGetSamplers(UINT StartSlot, UINT NumSamplers,
+                                               ID3D11SamplerState **ppSamplers)
 {
-	if(ppSamplers)
-	{
-		ID3D11SamplerState *real[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {0};
-		m_pRealContext->DSGetSamplers(StartSlot, NumSamplers, real);
+  if(ppSamplers)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		for(UINT i=0; i < NumSamplers; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppSamplers[i] = (ID3D11SamplerState *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppSamplers[i]);
+    ID3D11SamplerState *real[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {0};
+    m_pRealContext->DSGetSamplers(StartSlot, NumSamplers, real);
 
-			RDCASSERT(ppSamplers[i] == m_CurrentPipelineState->DS.Samplers[i+StartSlot]);
-		}
-	}
+    for(UINT i = 0; i < NumSamplers; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppSamplers[i] = (ID3D11SamplerState *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppSamplers[i]);
+
+      RDCASSERT(ppSamplers[i] == m_CurrentPipelineState->DS.Samplers[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::DSGetShader(ID3D11DomainShader **ppDomainShader, ID3D11ClassInstance **ppClassInstances, UINT *pNumClassInstances)
+void WrappedID3D11DeviceContext::DSGetShader(ID3D11DomainShader **ppDomainShader,
+                                             ID3D11ClassInstance **ppClassInstances,
+                                             UINT *pNumClassInstances)
 {
-	if(ppDomainShader == NULL && ppClassInstances == NULL && pNumClassInstances == NULL)
-		return;
-	
-	ID3D11ClassInstance *realInsts[D3D11_SHADER_MAX_INTERFACES] = {0};
-	UINT numInsts = 0;
-	ID3D11DomainShader *realShader = NULL;
-	m_pRealContext->DSGetShader(&realShader, realInsts, &numInsts);
-	
-	SAFE_RELEASE_NOCLEAR(realShader);
-	for(UINT i=0; i < numInsts; i++)
-		SAFE_RELEASE_NOCLEAR(realInsts[i]);
+  if(ppDomainShader == NULL && ppClassInstances == NULL && pNumClassInstances == NULL)
+    return;
 
-	if(ppDomainShader)
-	{
-		*ppDomainShader = (ID3D11DomainShader *)m_pDevice->GetResourceManager()->GetWrapper(realShader);
-		SAFE_ADDREF(*ppDomainShader);
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		RDCASSERT(*ppDomainShader == m_CurrentPipelineState->DS.Shader);
-	}
+  ID3D11ClassInstance *realInsts[D3D11_SHADER_MAX_INTERFACES] = {0};
+  UINT numInsts = 0;
+  ID3D11DomainShader *realShader = NULL;
+  m_pRealContext->DSGetShader(&realShader, realInsts, &numInsts);
 
-	if(ppClassInstances)
-	{
-		for(UINT i=0; i < numInsts; i++)
-		{
-			ppClassInstances[i] = (ID3D11ClassInstance *)m_pDevice->GetResourceManager()->GetWrapper(realInsts[i]);
-			SAFE_ADDREF(ppClassInstances[i]);
+  SAFE_RELEASE_NOCLEAR(realShader);
+  for(UINT i = 0; i < numInsts; i++)
+    SAFE_RELEASE_NOCLEAR(realInsts[i]);
 
-			RDCASSERT(ppClassInstances[i] == m_CurrentPipelineState->DS.Instances[i]);
-		}
-	}
+  if(ppDomainShader)
+  {
+    *ppDomainShader = (ID3D11DomainShader *)m_pDevice->GetResourceManager()->GetWrapper(realShader);
+    SAFE_ADDREF(*ppDomainShader);
 
-	if(pNumClassInstances)
-	{
-		*pNumClassInstances = numInsts;
-	}
+    RDCASSERT(*ppDomainShader == m_CurrentPipelineState->DS.Object);
+  }
+
+  if(ppClassInstances)
+  {
+    for(UINT i = 0; i < numInsts; i++)
+    {
+      ppClassInstances[i] =
+          (ID3D11ClassInstance *)m_pDevice->GetResourceManager()->GetWrapper(realInsts[i]);
+      SAFE_ADDREF(ppClassInstances[i]);
+
+      RDCASSERT(ppClassInstances[i] == m_CurrentPipelineState->DS.Instances[i]);
+    }
+  }
+
+  if(pNumClassInstances)
+  {
+    *pNumClassInstances = numInsts;
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_DSSetConstantBuffers(UINT StartSlot_, UINT NumBuffers_,
-												ID3D11Buffer *const *ppConstantBuffers)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_DSSetConstantBuffers(SerialiserType &ser, UINT StartSlot,
+                                                                UINT NumBuffers,
+                                                                ID3D11Buffer *const *ppConstantBuffers)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumBuffers, NumBuffers_);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumBuffers);
+  SERIALISE_ELEMENT_ARRAY(ppConstantBuffers, NumBuffers);
 
-	ID3D11Buffer **Buffers = new ID3D11Buffer *[NumBuffers];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumBuffers; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppConstantBuffers[i]));
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordConstantStats(ShaderStage::Domain, NumBuffers, ppConstantBuffers);
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Buffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Buffers[i] = NULL;
-	}
-	
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.ConstantBuffers, Buffers, StartSlot, NumBuffers);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->DS.CBOffsets, NullCBOffsets, StartSlot, NumBuffers);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->DS.CBCounts, NullCBCounts, StartSlot, NumBuffers);
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.ConstantBuffers,
+                                          ppConstantBuffers, StartSlot, NumBuffers);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->DS.CBOffsets, NullCBOffsets, StartSlot,
+                                   NumBuffers);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->DS.CBCounts, NullCBCounts, StartSlot,
+                                   NumBuffers);
 
-		for(UINT i=0; i < NumBuffers; i++)
-			Buffers[i] = UNWRAP(WrappedID3D11Buffer, Buffers[i]);
+    ID3D11Buffer *bufs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
+    for(UINT i = 0; i < NumBuffers; i++)
+      bufs[i] = UNWRAP(WrappedID3D11Buffer, ppConstantBuffers[i]);
 
-		m_pRealContext->DSSetConstantBuffers(StartSlot, NumBuffers, Buffers);
-		VerifyState();
-	}
+    m_pRealContext->DSSetConstantBuffers(StartSlot, NumBuffers, bufs);
+    VerifyState();
+  }
 
-	SAFE_DELETE_ARRAY(Buffers);
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::DSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D11Buffer *const *ppConstantBuffers)
+void WrappedID3D11DeviceContext::DSSetConstantBuffers(UINT StartSlot, UINT NumBuffers,
+                                                      ID3D11Buffer *const *ppConstantBuffers)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_DS_CBUFFERS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_DSSetConstantBuffers(StartSlot, NumBuffers, ppConstantBuffers);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.ConstantBuffers, ppConstantBuffers, StartSlot, NumBuffers);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->DS.CBOffsets, NullCBOffsets, StartSlot, NumBuffers);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->DS.CBCounts, NullCBCounts, StartSlot, NumBuffers);
+  m_EmptyCommandList = false;
 
-	ID3D11Buffer *bufs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
-	for(UINT i=0; i < NumBuffers; i++)
-	{
-		if(ppConstantBuffers[i] && m_State >= WRITING_CAPFRAME)
-			MarkResourceReferenced(GetIDForResource(ppConstantBuffers[i]), eFrameRef_Read);
+  ID3D11Buffer *bufs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
+  for(UINT i = 0; i < NumBuffers; i++)
+  {
+    if(ppConstantBuffers[i] && IsActiveCapturing(m_State))
+      MarkResourceReferenced(GetIDForDeviceChild(ppConstantBuffers[i]), eFrameRef_Read);
 
-		bufs[i] = UNWRAP(WrappedID3D11Buffer, ppConstantBuffers[i]);
-	}
+    bufs[i] = UNWRAP(WrappedID3D11Buffer, ppConstantBuffers[i]);
+  }
 
-	m_pRealContext->DSSetConstantBuffers(StartSlot, NumBuffers, bufs);
-	VerifyState();
+  SERIALISE_TIME_CALL(m_pRealContext->DSSetConstantBuffers(StartSlot, NumBuffers, bufs));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::DSSetConstantBuffers);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_DSSetConstantBuffers(GET_SERIALISER, StartSlot, NumBuffers, ppConstantBuffers);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.ConstantBuffers,
+                                        ppConstantBuffers, StartSlot, NumBuffers);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->DS.CBOffsets, NullCBOffsets, StartSlot,
+                                 NumBuffers);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->DS.CBCounts, NullCBCounts, StartSlot,
+                                 NumBuffers);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_DSSetShaderResources(UINT StartSlot_, UINT NumViews_, ID3D11ShaderResourceView *const *ppShaderResourceViews)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_DSSetShaderResources(
+    SerialiserType &ser, UINT StartSlot, UINT NumViews,
+    ID3D11ShaderResourceView *const *ppShaderResourceViews)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumViews, NumViews_);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumViews);
+  SERIALISE_ELEMENT_ARRAY(ppShaderResourceViews, NumViews);
 
-	ID3D11ShaderResourceView **Views = new ID3D11ShaderResourceView *[NumViews];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumViews; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppShaderResourceViews[i]));
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordResourceStats(ShaderStage::Domain, NumViews, ppShaderResourceViews);
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Views[i] = (ID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Views[i] = NULL;
-	}
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.SRVs, ppShaderResourceViews,
+                                          StartSlot, NumViews);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.SRVs, Views, StartSlot, NumViews);
+    ID3D11ShaderResourceView *SRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
+    for(UINT i = 0; i < NumViews; i++)
+      SRVs[i] = UNWRAP(WrappedID3D11ShaderResourceView1, ppShaderResourceViews[i]);
 
-		for(UINT i=0; i < NumViews; i++)
-			Views[i] = UNWRAP(WrappedID3D11ShaderResourceView, Views[i]);
+    m_pRealContext->DSSetShaderResources(StartSlot, NumViews, SRVs);
+    VerifyState();
+  }
 
-		m_pRealContext->DSSetShaderResources(StartSlot, NumViews, Views);
-		VerifyState();
-	}
-	
-	SAFE_DELETE_ARRAY(Views);
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::DSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView *const *ppShaderResourceViews)
+void WrappedID3D11DeviceContext::DSSetShaderResources(
+    UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView *const *ppShaderResourceViews)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_DS_RESOURCES);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_DSSetShaderResources(StartSlot, NumViews, ppShaderResourceViews);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.SRVs, ppShaderResourceViews, StartSlot, NumViews);
-	
-	ID3D11ShaderResourceView *SRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
-	for(UINT i=0; i < NumViews; i++)
-	{
-		if(ppShaderResourceViews[i] && m_State >= WRITING_CAPFRAME)
-		{
-			ID3D11Resource *res = NULL;
-			ppShaderResourceViews[i]->GetResource(&res);
-			MarkResourceReferenced(GetIDForResource(ppShaderResourceViews[i]), eFrameRef_Read);
-			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
-			SAFE_RELEASE(res);
-		}
+  m_EmptyCommandList = false;
 
-		SRVs[i] = UNWRAP(WrappedID3D11ShaderResourceView, ppShaderResourceViews[i]);
-	}
+  ID3D11ShaderResourceView *SRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
+  for(UINT i = 0; i < NumViews; i++)
+  {
+    if(ppShaderResourceViews[i] && IsActiveCapturing(m_State))
+    {
+      MarkResourceReferenced(GetIDForDeviceChild(ppShaderResourceViews[i]), eFrameRef_Read);
+      MarkResourceReferenced(GetViewResourceResID(ppShaderResourceViews[i]), eFrameRef_Read);
+    }
 
-	m_pRealContext->DSSetShaderResources(StartSlot, NumViews, SRVs);
-	VerifyState();
+    SRVs[i] = UNWRAP(WrappedID3D11ShaderResourceView1, ppShaderResourceViews[i]);
+  }
+
+  SERIALISE_TIME_CALL(m_pRealContext->DSSetShaderResources(StartSlot, NumViews, SRVs));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::DSSetShaderResources);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_DSSetShaderResources(GET_SERIALISER, StartSlot, NumViews, ppShaderResourceViews);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.SRVs, ppShaderResourceViews,
+                                        StartSlot, NumViews);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_DSSetSamplers(UINT StartSlot_, UINT NumSamplers_, ID3D11SamplerState *const *ppSamplers)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_DSSetSamplers(SerialiserType &ser, UINT StartSlot,
+                                                         UINT NumSamplers,
+                                                         ID3D11SamplerState *const *ppSamplers)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumSamplers, NumSamplers_);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumSamplers);
+  SERIALISE_ELEMENT_ARRAY(ppSamplers, NumSamplers);
 
-	ID3D11SamplerState **Sampler = new ID3D11SamplerState *[NumSamplers];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumSamplers; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppSamplers[i]));
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordSamplerStats(ShaderStage::Domain, NumSamplers, ppSamplers);
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Sampler[i] = (ID3D11SamplerState *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Sampler[i] = NULL;
-	}
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.Samplers, ppSamplers,
+                                          StartSlot, NumSamplers);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.Samplers, Sampler, StartSlot, NumSamplers);
+    ID3D11SamplerState *samps[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
+    for(UINT i = 0; i < NumSamplers; i++)
+      samps[i] = UNWRAP(WrappedID3D11SamplerState, ppSamplers[i]);
 
-		for(UINT i=0; i < NumSamplers; i++)
-			Sampler[i] = UNWRAP(WrappedID3D11SamplerState, Sampler[i]);
+    m_pRealContext->DSSetSamplers(StartSlot, NumSamplers, samps);
+    VerifyState();
+  }
 
-		m_pRealContext->DSSetSamplers(StartSlot, NumSamplers, Sampler);
-		VerifyState();
-	}
-		
-	SAFE_DELETE_ARRAY(Sampler);
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::DSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState *const *ppSamplers)
+void WrappedID3D11DeviceContext::DSSetSamplers(UINT StartSlot, UINT NumSamplers,
+                                               ID3D11SamplerState *const *ppSamplers)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_DS_SAMPLERS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_DSSetSamplers(StartSlot, NumSamplers, ppSamplers);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.Samplers, ppSamplers, StartSlot, NumSamplers);
-	
-	ID3D11SamplerState *samps[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
-	for(UINT i=0; i < NumSamplers; i++)
-		samps[i] = UNWRAP(WrappedID3D11SamplerState, ppSamplers[i]);
+  m_EmptyCommandList = false;
 
-	m_pRealContext->DSSetSamplers(StartSlot, NumSamplers, samps);
-	VerifyState();
+  ID3D11SamplerState *samps[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
+  for(UINT i = 0; i < NumSamplers; i++)
+  {
+    if(ppSamplers[i] && IsActiveCapturing(m_State))
+      MarkResourceReferenced(GetIDForDeviceChild(ppSamplers[i]), eFrameRef_Read);
+
+    samps[i] = UNWRAP(WrappedID3D11SamplerState, ppSamplers[i]);
+  }
+
+  SERIALISE_TIME_CALL(m_pRealContext->DSSetSamplers(StartSlot, NumSamplers, samps));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::DSSetSamplers);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_DSSetSamplers(GET_SERIALISER, StartSlot, NumSamplers, ppSamplers);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.Samplers, ppSamplers, StartSlot,
+                                        NumSamplers);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_DSSetShader(ID3D11DomainShader *pShader, ID3D11ClassInstance *const *ppClassInstances,
-														UINT NumClassInstances_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_DSSetShader(SerialiserType &ser,
+                                                       ID3D11DomainShader *pShader,
+                                                       ID3D11ClassInstance *const *ppClassInstances,
+                                                       UINT NumClassInstances)
 {
-	SERIALISE_ELEMENT(ResourceId, Shader, GetIDForResource(pShader));
-	SERIALISE_ELEMENT(uint32_t, NumClassInstances, NumClassInstances_);
-	
-	ID3D11ClassInstance **Instances = new ID3D11ClassInstance *[NumClassInstances];
+  SERIALISE_ELEMENT(pShader);
+  SERIALISE_ELEMENT_ARRAY(ppClassInstances, NumClassInstances);
+  SERIALISE_ELEMENT(NumClassInstances);
 
-	for(UINT i=0; i < NumClassInstances; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppClassInstances[i]));
+  SERIALISE_CHECK_READ_ERRORS();
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Instances[i] = (ID3D11ClassInstance *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Instances[i] = NULL;
-	}
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordShaderStats(ShaderStage::Domain, m_CurrentPipelineState->DS.Object, pShader);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.Instances, Instances, 0, NumClassInstances);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->DS.NumInstances, NumClassInstances);
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.Instances, ppClassInstances, 0,
+                                          NumClassInstances);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->DS.NumInstances, NumClassInstances);
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.Object,
+                                          (ID3D11DeviceChild *)pShader);
 
-		for(UINT i=0; i < NumClassInstances; i++)
-			Instances[i] = UNWRAP(WrappedID3D11ClassInstance, Instances[i]);
+    ID3D11ClassInstance *insts[D3D11_SHADER_MAX_INTERFACES] = {0};
+    for(UINT i = 0; i < NumClassInstances; i++)
+      insts[i] = UNWRAP(WrappedID3D11ClassInstance, ppClassInstances[i]);
 
-		ID3D11DeviceChild *pSH = NULL;
-		if(m_pDevice->GetResourceManager()->HasLiveResource(Shader))
-			pSH = (ID3D11DeviceChild *)m_pDevice->GetResourceManager()->GetLiveResource(Shader);
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.Shader, pSH);
-		m_pRealContext->DSSetShader(UNWRAP(WrappedID3D11Shader<ID3D11DomainShader>, pSH), Instances, NumClassInstances);
-		VerifyState();
-	}
+    m_pRealContext->DSSetShader(UNWRAP(WrappedID3D11Shader<ID3D11DomainShader>, pShader), insts,
+                                NumClassInstances);
+    VerifyState();
+  }
 
-	SAFE_DELETE_ARRAY(Instances);
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::DSSetShader(ID3D11DomainShader *pDomainShader, ID3D11ClassInstance *const *ppClassInstances, UINT NumClassInstances)
+void WrappedID3D11DeviceContext::DSSetShader(ID3D11DomainShader *pDomainShader,
+                                             ID3D11ClassInstance *const *ppClassInstances,
+                                             UINT NumClassInstances)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_DS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_DSSetShader(pDomainShader, ppClassInstances, NumClassInstances);
-		
-		MarkResourceReferenced(GetIDForResource(pDomainShader), eFrameRef_Read);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.Shader, (ID3D11DeviceChild *)pDomainShader);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->DS.NumInstances, NumClassInstances);
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.Instances, ppClassInstances, 0, NumClassInstances);
-	
-	ID3D11ClassInstance *insts[D3D11_SHADER_MAX_INTERFACES] = {0};
-	if(ppClassInstances && NumClassInstances > 0)
-		for(UINT i=0; i < NumClassInstances; i++)
-			insts[i] = UNWRAP(WrappedID3D11ClassInstance, ppClassInstances[i]);
-	
-	m_pRealContext->DSSetShader(UNWRAP(WrappedID3D11Shader<ID3D11DomainShader>, pDomainShader), insts, NumClassInstances);
-	VerifyState();
+  m_EmptyCommandList = false;
+
+  ID3D11ClassInstance *insts[D3D11_SHADER_MAX_INTERFACES] = {0};
+  if(ppClassInstances && NumClassInstances > 0)
+    for(UINT i = 0; i < NumClassInstances; i++)
+      insts[i] = UNWRAP(WrappedID3D11ClassInstance, ppClassInstances[i]);
+
+  SERIALISE_TIME_CALL(m_pRealContext->DSSetShader(
+      UNWRAP(WrappedID3D11Shader<ID3D11DomainShader>, pDomainShader), insts, NumClassInstances));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::DSSetShader);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_DSSetShader(GET_SERIALISER, pDomainShader, ppClassInstances, NumClassInstances);
+
+    MarkResourceReferenced(GetIDForDeviceChild(pDomainShader), eFrameRef_Read);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.Object,
+                                        (ID3D11DeviceChild *)pDomainShader);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->DS.NumInstances, NumClassInstances);
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->DS.Instances, ppClassInstances, 0,
+                                        NumClassInstances);
+
+  VerifyState();
 }
 
 #pragma endregion Domain Shader
 
 #pragma region Geometry Shader
 
-void WrappedID3D11DeviceContext::GSGetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D11Buffer **ppConstantBuffers)
+void WrappedID3D11DeviceContext::GSGetConstantBuffers(UINT StartSlot, UINT NumBuffers,
+                                                      ID3D11Buffer **ppConstantBuffers)
 {
-	if(ppConstantBuffers)
-	{
-		ID3D11Buffer *real[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
-		m_pRealContext->GSGetConstantBuffers(StartSlot, NumBuffers, real);
-	
-		for(UINT i=0; i < NumBuffers; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppConstantBuffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppConstantBuffers[i]);
+  if(ppConstantBuffers)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-			RDCASSERT(ppConstantBuffers[i] == m_CurrentPipelineState->GS.ConstantBuffers[i+StartSlot]);
-		}
-	}
+    ID3D11Buffer *real[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
+    m_pRealContext->GSGetConstantBuffers(StartSlot, NumBuffers, real);
+
+    for(UINT i = 0; i < NumBuffers; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppConstantBuffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppConstantBuffers[i]);
+
+      RDCASSERT(ppConstantBuffers[i] == m_CurrentPipelineState->GS.ConstantBuffers[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::GSGetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView **ppShaderResourceViews)
+void WrappedID3D11DeviceContext::GSGetShaderResources(UINT StartSlot, UINT NumViews,
+                                                      ID3D11ShaderResourceView **ppShaderResourceViews)
 {
-	if(ppShaderResourceViews)
-	{
-		ID3D11ShaderResourceView *real[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {0};
-		m_pRealContext->GSGetShaderResources(StartSlot, NumViews, real);
+  if(ppShaderResourceViews)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		for(UINT i=0; i < NumViews; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppShaderResourceViews[i] = (ID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppShaderResourceViews[i]);
+    ID3D11ShaderResourceView *real[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {0};
+    m_pRealContext->GSGetShaderResources(StartSlot, NumViews, real);
 
-			RDCASSERT(ppShaderResourceViews[i] == m_CurrentPipelineState->GS.SRVs[i+StartSlot]);
-		}
-	}
+    for(UINT i = 0; i < NumViews; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppShaderResourceViews[i] =
+          (ID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppShaderResourceViews[i]);
+
+      RDCASSERT(ppShaderResourceViews[i] == m_CurrentPipelineState->GS.SRVs[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::GSGetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState **ppSamplers)
+void WrappedID3D11DeviceContext::GSGetSamplers(UINT StartSlot, UINT NumSamplers,
+                                               ID3D11SamplerState **ppSamplers)
 {
-	if(ppSamplers)
-	{
-		ID3D11SamplerState *real[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {0};
-		m_pRealContext->GSGetSamplers(StartSlot, NumSamplers, real);
+  if(ppSamplers)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		for(UINT i=0; i < NumSamplers; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppSamplers[i] = (ID3D11SamplerState *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppSamplers[i]);
+    ID3D11SamplerState *real[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {0};
+    m_pRealContext->GSGetSamplers(StartSlot, NumSamplers, real);
 
-			RDCASSERT(ppSamplers[i] == m_CurrentPipelineState->GS.Samplers[i+StartSlot]);
-		}
-	}
+    for(UINT i = 0; i < NumSamplers; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppSamplers[i] = (ID3D11SamplerState *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppSamplers[i]);
+
+      RDCASSERT(ppSamplers[i] == m_CurrentPipelineState->GS.Samplers[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::GSGetShader(ID3D11GeometryShader **ppGeometryShader, ID3D11ClassInstance **ppClassInstances, UINT *pNumClassInstances)
+void WrappedID3D11DeviceContext::GSGetShader(ID3D11GeometryShader **ppGeometryShader,
+                                             ID3D11ClassInstance **ppClassInstances,
+                                             UINT *pNumClassInstances)
 {
-	if(ppGeometryShader == NULL && ppClassInstances == NULL && pNumClassInstances == NULL)
-		return;
-	
-	ID3D11ClassInstance *realInsts[D3D11_SHADER_MAX_INTERFACES] = {0};
-	UINT numInsts = 0;
-	ID3D11GeometryShader *realShader = NULL;
-	m_pRealContext->GSGetShader(&realShader, realInsts, &numInsts);
-	
-	SAFE_RELEASE_NOCLEAR(realShader);
-	for(UINT i=0; i < numInsts; i++)
-		SAFE_RELEASE_NOCLEAR(realInsts[i]);
+  if(ppGeometryShader == NULL && ppClassInstances == NULL && pNumClassInstances == NULL)
+    return;
 
-	if(ppGeometryShader)
-	{
-		*ppGeometryShader = (ID3D11GeometryShader *)m_pDevice->GetResourceManager()->GetWrapper(realShader);
-		SAFE_ADDREF(*ppGeometryShader);
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		RDCASSERT(*ppGeometryShader == m_CurrentPipelineState->GS.Shader);
-	}
+  ID3D11ClassInstance *realInsts[D3D11_SHADER_MAX_INTERFACES] = {0};
+  UINT numInsts = 0;
+  ID3D11GeometryShader *realShader = NULL;
+  m_pRealContext->GSGetShader(&realShader, realInsts, &numInsts);
 
-	if(ppClassInstances)
-	{
-		for(UINT i=0; i < numInsts; i++)
-		{
-			ppClassInstances[i] = (ID3D11ClassInstance *)m_pDevice->GetResourceManager()->GetWrapper(realInsts[i]);
-			SAFE_ADDREF(ppClassInstances[i]);
+  SAFE_RELEASE_NOCLEAR(realShader);
+  for(UINT i = 0; i < numInsts; i++)
+    SAFE_RELEASE_NOCLEAR(realInsts[i]);
 
-			RDCASSERT(ppClassInstances[i] == m_CurrentPipelineState->GS.Instances[i]);
-		}
-	}
+  if(ppGeometryShader)
+  {
+    *ppGeometryShader =
+        (ID3D11GeometryShader *)m_pDevice->GetResourceManager()->GetWrapper(realShader);
+    SAFE_ADDREF(*ppGeometryShader);
 
-	if(pNumClassInstances)
-	{
-		*pNumClassInstances = numInsts;
-	}
+    RDCASSERT(*ppGeometryShader == m_CurrentPipelineState->GS.Object);
+  }
+
+  if(ppClassInstances)
+  {
+    for(UINT i = 0; i < numInsts; i++)
+    {
+      ppClassInstances[i] =
+          (ID3D11ClassInstance *)m_pDevice->GetResourceManager()->GetWrapper(realInsts[i]);
+      SAFE_ADDREF(ppClassInstances[i]);
+
+      RDCASSERT(ppClassInstances[i] == m_CurrentPipelineState->GS.Instances[i]);
+    }
+  }
+
+  if(pNumClassInstances)
+  {
+    *pNumClassInstances = numInsts;
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_GSSetConstantBuffers(UINT StartSlot_, UINT NumBuffers_,
-												ID3D11Buffer *const *ppConstantBuffers)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_GSSetConstantBuffers(SerialiserType &ser, UINT StartSlot,
+                                                                UINT NumBuffers,
+                                                                ID3D11Buffer *const *ppConstantBuffers)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumBuffers, NumBuffers_);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumBuffers);
+  SERIALISE_ELEMENT_ARRAY(ppConstantBuffers, NumBuffers);
 
-	ID3D11Buffer **Buffers = new ID3D11Buffer *[NumBuffers];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumBuffers; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppConstantBuffers[i]));
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordConstantStats(ShaderStage::Geometry, NumBuffers, ppConstantBuffers);
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Buffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Buffers[i] = NULL;
-	}
-	
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.ConstantBuffers, Buffers, StartSlot, NumBuffers);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->GS.CBOffsets, NullCBOffsets, StartSlot, NumBuffers);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->GS.CBCounts, NullCBCounts, StartSlot, NumBuffers);
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.ConstantBuffers,
+                                          ppConstantBuffers, StartSlot, NumBuffers);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->GS.CBOffsets, NullCBOffsets, StartSlot,
+                                   NumBuffers);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->GS.CBCounts, NullCBCounts, StartSlot,
+                                   NumBuffers);
 
-		for(UINT i=0; i < NumBuffers; i++)
-			Buffers[i] = UNWRAP(WrappedID3D11Buffer, Buffers[i]);
+    ID3D11Buffer *bufs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
+    for(UINT i = 0; i < NumBuffers; i++)
+      bufs[i] = UNWRAP(WrappedID3D11Buffer, ppConstantBuffers[i]);
 
-		m_pRealContext->GSSetConstantBuffers(StartSlot, NumBuffers, Buffers);
-		VerifyState();
-	}
+    m_pRealContext->GSSetConstantBuffers(StartSlot, NumBuffers, bufs);
+    VerifyState();
+  }
 
-	SAFE_DELETE_ARRAY(Buffers);
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::GSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D11Buffer *const *ppConstantBuffers)
+void WrappedID3D11DeviceContext::GSSetConstantBuffers(UINT StartSlot, UINT NumBuffers,
+                                                      ID3D11Buffer *const *ppConstantBuffers)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_GS_CBUFFERS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_GSSetConstantBuffers(StartSlot, NumBuffers, ppConstantBuffers);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.ConstantBuffers, ppConstantBuffers, StartSlot, NumBuffers);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->GS.CBOffsets, NullCBOffsets, StartSlot, NumBuffers);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->GS.CBCounts, NullCBCounts, StartSlot, NumBuffers);
+  m_EmptyCommandList = false;
 
-	ID3D11Buffer *bufs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
-	for(UINT i=0; i < NumBuffers; i++)
-	{
-		if(ppConstantBuffers[i] && m_State >= WRITING_CAPFRAME)
-			MarkResourceReferenced(GetIDForResource(ppConstantBuffers[i]), eFrameRef_Read);
+  ID3D11Buffer *bufs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
+  for(UINT i = 0; i < NumBuffers; i++)
+  {
+    if(ppConstantBuffers[i] && IsActiveCapturing(m_State))
+      MarkResourceReferenced(GetIDForDeviceChild(ppConstantBuffers[i]), eFrameRef_Read);
 
-		bufs[i] = UNWRAP(WrappedID3D11Buffer, ppConstantBuffers[i]);
-	}
+    bufs[i] = UNWRAP(WrappedID3D11Buffer, ppConstantBuffers[i]);
+  }
 
-	m_pRealContext->GSSetConstantBuffers(StartSlot, NumBuffers, bufs);
-	VerifyState();
+  SERIALISE_TIME_CALL(m_pRealContext->GSSetConstantBuffers(StartSlot, NumBuffers, bufs));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::GSSetConstantBuffers);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_GSSetConstantBuffers(GET_SERIALISER, StartSlot, NumBuffers, ppConstantBuffers);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.ConstantBuffers,
+                                        ppConstantBuffers, StartSlot, NumBuffers);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->GS.CBOffsets, NullCBOffsets, StartSlot,
+                                 NumBuffers);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->GS.CBCounts, NullCBCounts, StartSlot,
+                                 NumBuffers);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_GSSetShaderResources(UINT StartSlot_, UINT NumViews_, ID3D11ShaderResourceView *const *ppShaderResourceViews)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_GSSetShaderResources(
+    SerialiserType &ser, UINT StartSlot, UINT NumViews,
+    ID3D11ShaderResourceView *const *ppShaderResourceViews)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumViews, NumViews_);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumViews);
+  SERIALISE_ELEMENT_ARRAY(ppShaderResourceViews, NumViews);
 
-	ID3D11ShaderResourceView **Views = new ID3D11ShaderResourceView *[NumViews];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumViews; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppShaderResourceViews[i]));
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordResourceStats(ShaderStage::Geometry, NumViews, ppShaderResourceViews);
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Views[i] = (ID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Views[i] = NULL;
-	}
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.SRVs, ppShaderResourceViews,
+                                          StartSlot, NumViews);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.SRVs, Views, StartSlot, NumViews);
+    ID3D11ShaderResourceView *SRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
+    for(UINT i = 0; i < NumViews; i++)
+      SRVs[i] = UNWRAP(WrappedID3D11ShaderResourceView1, ppShaderResourceViews[i]);
 
-		for(UINT i=0; i < NumViews; i++)
-			Views[i] = UNWRAP(WrappedID3D11ShaderResourceView, Views[i]);
+    m_pRealContext->GSSetShaderResources(StartSlot, NumViews, SRVs);
+    VerifyState();
+  }
 
-		m_pRealContext->GSSetShaderResources(StartSlot, NumViews, Views);
-		VerifyState();
-	}
-	
-	SAFE_DELETE_ARRAY(Views);
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::GSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView *const *ppShaderResourceViews)
+void WrappedID3D11DeviceContext::GSSetShaderResources(
+    UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView *const *ppShaderResourceViews)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_GS_RESOURCES);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_GSSetShaderResources(StartSlot, NumViews, ppShaderResourceViews);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.SRVs, ppShaderResourceViews, StartSlot, NumViews);
-	
-	ID3D11ShaderResourceView *SRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
-	for(UINT i=0; i < NumViews; i++)
-	{
-		if(ppShaderResourceViews[i] && m_State >= WRITING_CAPFRAME)
-		{
-			ID3D11Resource *res = NULL;
-			ppShaderResourceViews[i]->GetResource(&res);
-			MarkResourceReferenced(GetIDForResource(ppShaderResourceViews[i]), eFrameRef_Read);
-			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
-			SAFE_RELEASE(res);
-		}
+  m_EmptyCommandList = false;
 
-		SRVs[i] = UNWRAP(WrappedID3D11ShaderResourceView, ppShaderResourceViews[i]);
-	}
+  ID3D11ShaderResourceView *SRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
+  for(UINT i = 0; i < NumViews; i++)
+  {
+    if(ppShaderResourceViews[i] && IsActiveCapturing(m_State))
+    {
+      MarkResourceReferenced(GetIDForDeviceChild(ppShaderResourceViews[i]), eFrameRef_Read);
+      MarkResourceReferenced(GetViewResourceResID(ppShaderResourceViews[i]), eFrameRef_Read);
+    }
 
-	m_pRealContext->GSSetShaderResources(StartSlot, NumViews, SRVs);
-	VerifyState();
+    SRVs[i] = UNWRAP(WrappedID3D11ShaderResourceView1, ppShaderResourceViews[i]);
+  }
+
+  SERIALISE_TIME_CALL(m_pRealContext->GSSetShaderResources(StartSlot, NumViews, SRVs));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::GSSetShaderResources);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_GSSetShaderResources(GET_SERIALISER, StartSlot, NumViews, ppShaderResourceViews);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.SRVs, ppShaderResourceViews,
+                                        StartSlot, NumViews);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_GSSetSamplers(UINT StartSlot_, UINT NumSamplers_, ID3D11SamplerState *const *ppSamplers)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_GSSetSamplers(SerialiserType &ser, UINT StartSlot,
+                                                         UINT NumSamplers,
+                                                         ID3D11SamplerState *const *ppSamplers)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumSamplers, NumSamplers_);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumSamplers);
+  SERIALISE_ELEMENT_ARRAY(ppSamplers, NumSamplers);
 
-	ID3D11SamplerState **Sampler = new ID3D11SamplerState *[NumSamplers];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumSamplers; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppSamplers[i]));
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordSamplerStats(ShaderStage::Geometry, NumSamplers, ppSamplers);
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Sampler[i] = (ID3D11SamplerState *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Sampler[i] = NULL;
-	}
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.Samplers, ppSamplers,
+                                          StartSlot, NumSamplers);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.Samplers, Sampler, StartSlot, NumSamplers);
+    ID3D11SamplerState *samps[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
+    for(UINT i = 0; i < NumSamplers; i++)
+      samps[i] = UNWRAP(WrappedID3D11SamplerState, ppSamplers[i]);
 
-		for(UINT i=0; i < NumSamplers; i++)
-			Sampler[i] = UNWRAP(WrappedID3D11SamplerState, Sampler[i]);
+    m_pRealContext->GSSetSamplers(StartSlot, NumSamplers, samps);
+    VerifyState();
+  }
 
-		m_pRealContext->GSSetSamplers(StartSlot, NumSamplers, Sampler);
-		VerifyState();
-	}
-		
-	SAFE_DELETE_ARRAY(Sampler);
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::GSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState *const *ppSamplers)
+void WrappedID3D11DeviceContext::GSSetSamplers(UINT StartSlot, UINT NumSamplers,
+                                               ID3D11SamplerState *const *ppSamplers)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_GS_SAMPLERS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_GSSetSamplers(StartSlot, NumSamplers, ppSamplers);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.Samplers, ppSamplers, StartSlot, NumSamplers);
-	
-	ID3D11SamplerState *samps[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
-	for(UINT i=0; i < NumSamplers; i++)
-		samps[i] = UNWRAP(WrappedID3D11SamplerState, ppSamplers[i]);
+  m_EmptyCommandList = false;
 
-	m_pRealContext->GSSetSamplers(StartSlot, NumSamplers, samps);
-	VerifyState();
+  ID3D11SamplerState *samps[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
+  for(UINT i = 0; i < NumSamplers; i++)
+  {
+    if(ppSamplers[i] && IsActiveCapturing(m_State))
+      MarkResourceReferenced(GetIDForDeviceChild(ppSamplers[i]), eFrameRef_Read);
+
+    samps[i] = UNWRAP(WrappedID3D11SamplerState, ppSamplers[i]);
+  }
+
+  SERIALISE_TIME_CALL(m_pRealContext->GSSetSamplers(StartSlot, NumSamplers, samps));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::GSSetSamplers);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_GSSetSamplers(GET_SERIALISER, StartSlot, NumSamplers, ppSamplers);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.Samplers, ppSamplers, StartSlot,
+                                        NumSamplers);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_GSSetShader(ID3D11GeometryShader *pShader, ID3D11ClassInstance *const *ppClassInstances,
-														UINT NumClassInstances_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_GSSetShader(SerialiserType &ser,
+                                                       ID3D11GeometryShader *pShader,
+                                                       ID3D11ClassInstance *const *ppClassInstances,
+                                                       UINT NumClassInstances)
 {
-	SERIALISE_ELEMENT(ResourceId, Shader, GetIDForResource(pShader));
-	SERIALISE_ELEMENT(uint32_t, NumClassInstances, NumClassInstances_);
-	
-	ID3D11ClassInstance **Instances = new ID3D11ClassInstance *[NumClassInstances];
+  SERIALISE_ELEMENT(pShader);
+  SERIALISE_ELEMENT_ARRAY(ppClassInstances, NumClassInstances);
+  SERIALISE_ELEMENT(NumClassInstances);
 
-	for(UINT i=0; i < NumClassInstances; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppClassInstances[i]));
+  SERIALISE_CHECK_READ_ERRORS();
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Instances[i] = (ID3D11ClassInstance *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Instances[i] = NULL;
-	}
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordShaderStats(ShaderStage::Geometry, m_CurrentPipelineState->GS.Object, pShader);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.Instances, Instances, 0, NumClassInstances);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->GS.NumInstances, NumClassInstances);
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.Instances, ppClassInstances, 0,
+                                          NumClassInstances);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->GS.NumInstances, NumClassInstances);
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.Object,
+                                          (ID3D11DeviceChild *)pShader);
 
-		for(UINT i=0; i < NumClassInstances; i++)
-			Instances[i] = UNWRAP(WrappedID3D11ClassInstance, Instances[i]);
+    ID3D11ClassInstance *insts[D3D11_SHADER_MAX_INTERFACES] = {0};
+    for(UINT i = 0; i < NumClassInstances; i++)
+      insts[i] = UNWRAP(WrappedID3D11ClassInstance, ppClassInstances[i]);
 
-		ID3D11DeviceChild *pSH = NULL;
-		if(m_pDevice->GetResourceManager()->HasLiveResource(Shader))
-			pSH = (ID3D11DeviceChild *)m_pDevice->GetResourceManager()->GetLiveResource(Shader);
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.Shader, pSH);
-		m_pRealContext->GSSetShader(UNWRAP(WrappedID3D11Shader<ID3D11GeometryShader>, pSH), Instances, NumClassInstances);
-		VerifyState();
-	}
+    m_pRealContext->GSSetShader(UNWRAP(WrappedID3D11Shader<ID3D11GeometryShader>, pShader), insts,
+                                NumClassInstances);
+    VerifyState();
+  }
 
-	SAFE_DELETE_ARRAY(Instances);
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::GSSetShader( ID3D11GeometryShader *pShader, ID3D11ClassInstance *const *ppClassInstances, UINT NumClassInstances)
+void WrappedID3D11DeviceContext::GSSetShader(ID3D11GeometryShader *pShader,
+                                             ID3D11ClassInstance *const *ppClassInstances,
+                                             UINT NumClassInstances)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_GS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_GSSetShader(pShader, ppClassInstances, NumClassInstances);
-		
-		MarkResourceReferenced(GetIDForResource(pShader), eFrameRef_Read);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.Shader, (ID3D11DeviceChild *)pShader);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->GS.NumInstances, NumClassInstances);
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.Instances, ppClassInstances, 0, NumClassInstances);
-	
-	ID3D11ClassInstance *insts[D3D11_SHADER_MAX_INTERFACES] = {0};
-	if(ppClassInstances && NumClassInstances > 0)
-		for(UINT i=0; i < NumClassInstances; i++)
-			insts[i] = UNWRAP(WrappedID3D11ClassInstance, ppClassInstances[i]);
-	
-	m_pRealContext->GSSetShader(UNWRAP(WrappedID3D11Shader<ID3D11GeometryShader>, pShader), insts, NumClassInstances);
-	VerifyState();
+  m_EmptyCommandList = false;
+
+  ID3D11ClassInstance *insts[D3D11_SHADER_MAX_INTERFACES] = {0};
+  if(ppClassInstances && NumClassInstances > 0)
+    for(UINT i = 0; i < NumClassInstances; i++)
+      insts[i] = UNWRAP(WrappedID3D11ClassInstance, ppClassInstances[i]);
+
+  SERIALISE_TIME_CALL(m_pRealContext->GSSetShader(
+      UNWRAP(WrappedID3D11Shader<ID3D11GeometryShader>, pShader), insts, NumClassInstances));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::GSSetShader);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_GSSetShader(GET_SERIALISER, pShader, ppClassInstances, NumClassInstances);
+
+    MarkResourceReferenced(GetIDForDeviceChild(pShader), eFrameRef_Read);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.Object,
+                                        (ID3D11DeviceChild *)pShader);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->GS.NumInstances, NumClassInstances);
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->GS.Instances, ppClassInstances, 0,
+                                        NumClassInstances);
+
+  VerifyState();
 }
 
 #pragma endregion Geometry Shader
@@ -1944,210 +2160,212 @@ void WrappedID3D11DeviceContext::GSSetShader( ID3D11GeometryShader *pShader, ID3
 
 void WrappedID3D11DeviceContext::SOGetTargets(UINT NumBuffers, ID3D11Buffer **ppSOTargets)
 {
-	if(ppSOTargets)
-	{
-		ID3D11Buffer *real[D3D11_SO_BUFFER_SLOT_COUNT] = {0};
-		m_pRealContext->SOGetTargets(NumBuffers, real);
+  if(ppSOTargets)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		for(UINT i=0; i < NumBuffers; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppSOTargets[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppSOTargets[i]);
+    ID3D11Buffer *real[D3D11_SO_BUFFER_SLOT_COUNT] = {0};
+    m_pRealContext->SOGetTargets(NumBuffers, real);
 
-			RDCASSERT(ppSOTargets[i] == m_CurrentPipelineState->SO.Buffers[i]);
-		}
-	}
+    for(UINT i = 0; i < NumBuffers; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppSOTargets[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppSOTargets[i]);
+
+      RDCASSERT(ppSOTargets[i] == m_CurrentPipelineState->SO.Buffers[i]);
+    }
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_SOSetTargets(UINT NumBuffers_, ID3D11Buffer *const *ppSOTargets, const UINT *pOffsets)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_SOSetTargets(SerialiserType &ser, UINT NumBuffers,
+                                                        ID3D11Buffer *const *ppSOTargets,
+                                                        const UINT *pOffsets)
 {
-	SERIALISE_ELEMENT(uint32_t, NumBuffers, NumBuffers_);
+  SERIALISE_ELEMENT(NumBuffers);
+  SERIALISE_ELEMENT_ARRAY(ppSOTargets, NumBuffers);
+  SERIALISE_ELEMENT_ARRAY(pOffsets, NumBuffers);
 
-	SERIALISE_ELEMENT_ARR(uint32_t, Offsets, pOffsets, NumBuffers);
+  SERIALISE_CHECK_READ_ERRORS();
 
-	ID3D11Buffer **Buffers = new ID3D11Buffer *[NumBuffers];
-	
-	for(UINT i=0; i < NumBuffers; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppSOTargets[i]));
+  if(IsReplayingAndReading())
+  {
+    // "If less than four [buffers] are defined by the call, the remaining buffer slots are set to
+    // NULL."
+    ID3D11Buffer *setbufs[D3D11_SO_STREAM_COUNT] = {0};
+    UINT setoffs[D3D11_SO_STREAM_COUNT] = {0};
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Buffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Buffers[i] = NULL;
-	}
+    for(UINT b = 0; b < NumBuffers; b++)
+    {
+      setbufs[b] = ppSOTargets ? ppSOTargets[b] : NULL;
+      // passing NULL for pOffsets seems to act like -1 => append
+      setoffs[b] = pOffsets ? pOffsets[b] : ~0U;
+    }
 
-	if(m_State <= EXECUTING)
-	{
-		ID3D11Buffer *setbufs[4] = {0};
-		UINT setoffs[4] = {0};
+    // end stream-out queries for outgoing targets
+    for(UINT b = 0; b < D3D11_SO_STREAM_COUNT; b++)
+    {
+      ID3D11Buffer *buf = m_CurrentPipelineState->SO.Buffers[b];
 
-		for(UINT b=0; b < NumBuffers; b++)
-		{
-			setbufs[b] = Buffers[b];
-			setoffs[b] = Offsets[b];
-		}
+      if(buf)
+      {
+        ResourceId id = GetIDForDeviceChild(buf);
 
-		// end stream-out queries for outgoing targets
-		for(UINT b=0; b < 4; b++)
-		{
-			ID3D11Buffer *buf = m_CurrentPipelineState->SO.Buffers[b];
+        if(m_StreamOutCounters[id].running)
+        {
+          m_pRealContext->End(m_StreamOutCounters[id].query);
+          m_StreamOutCounters[id].running = false;
+        }
+      }
+    }
 
-			if(buf)
-			{
-				ResourceId id = GetIDForResource(buf);
+    // start new queries for incoming targets
+    for(UINT b = 0; b < D3D11_SO_STREAM_COUNT; b++)
+    {
+      ID3D11Buffer *buf = setbufs[b];
 
-				m_pRealContext->End(m_StreamOutCounters[id].query);
-				m_StreamOutCounters[id].running = false;
-			}
-		}
+      if(buf)
+      {
+        ResourceId id = GetIDForDeviceChild(buf);
 
-		// start new queries for incoming targets
-		for(UINT b=0; b < 4; b++)
-		{
-			ID3D11Buffer *buf = setbufs[b];
+        // release any previous query as the hidden counter is overwritten
+        SAFE_RELEASE(m_StreamOutCounters[id].query);
 
-			if(buf)
-			{
-				ResourceId id = GetIDForResource(buf);
+        D3D11_QUERY queryTypes[] = {
+            D3D11_QUERY_SO_STATISTICS_STREAM0, D3D11_QUERY_SO_STATISTICS_STREAM1,
+            D3D11_QUERY_SO_STATISTICS_STREAM2, D3D11_QUERY_SO_STATISTICS_STREAM3,
+        };
 
-				// release any previous query as the hidden counter is overwritten
-				SAFE_RELEASE(m_StreamOutCounters[id].query);
+        D3D11_QUERY_DESC qdesc;
+        qdesc.MiscFlags = 0;
+        qdesc.Query = queryTypes[b];
 
-				D3D11_QUERY queryTypes[] = {
-					D3D11_QUERY_SO_STATISTICS_STREAM0,
-					D3D11_QUERY_SO_STATISTICS_STREAM1,
-					D3D11_QUERY_SO_STATISTICS_STREAM2,
-					D3D11_QUERY_SO_STATISTICS_STREAM3,
-				};
+        HRESULT hr = m_pDevice->GetReal()->CreateQuery(&qdesc, &m_StreamOutCounters[id].query);
 
-				D3D11_QUERY_DESC qdesc;
-				qdesc.MiscFlags = 0;
-				qdesc.Query = queryTypes[b];
+        if(FAILED(hr))
+          RDCERR("Couldn't create streamout query: %s", ToStr(hr).c_str());
 
-				m_pDevice->GetReal()->CreateQuery(&qdesc, &m_StreamOutCounters[id].query);
+        m_pRealContext->Begin(m_StreamOutCounters[id].query);
+        m_StreamOutCounters[id].running = true;
+      }
+    }
 
-				m_pRealContext->Begin(m_StreamOutCounters[id].query);
-				m_StreamOutCounters[id].running = true;
-			}
-		}
+    m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->SO.Buffers, setbufs, 0,
+                                           D3D11_SO_STREAM_COUNT);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->SO.Offsets, setoffs, 0,
+                                   D3D11_SO_STREAM_COUNT);
 
-		m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->SO.Buffers, setbufs, 0, 4);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->SO.Offsets, setoffs, 0, 4);
-	}
-	
-	for(UINT i=0; i < NumBuffers; i++)
-		if(m_State <= EXECUTING)
-			Buffers[i] = UNWRAP(WrappedID3D11Buffer, Buffers[i]);
-	
-	if(m_State <= EXECUTING)
-	{
-		m_pRealContext->SOSetTargets(NumBuffers, Buffers, Offsets);
-		VerifyState();
-	}
+    for(UINT i = 0; i < NumBuffers; i++)
+      setbufs[i] = UNWRAP(WrappedID3D11Buffer, setbufs[i]);
 
-	SAFE_DELETE_ARRAY(Buffers);
-	SAFE_DELETE_ARRAY(Offsets);
+    m_pRealContext->SOSetTargets(NumBuffers, setbufs, setoffs);
+    VerifyState();
+  }
 
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::SOSetTargets(UINT NumBuffers, ID3D11Buffer *const *ppSOTargets, const UINT *pOffsets)
+void WrappedID3D11DeviceContext::SOSetTargets(UINT NumBuffers, ID3D11Buffer *const *ppSOTargets,
+                                              const UINT *pOffsets)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_SO_TARGETS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_SOSetTargets(NumBuffers, ppSOTargets, pOffsets);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
+  m_EmptyCommandList = false;
 
-	ID3D11Buffer *setbufs[4] = {0};
-	UINT setoffs[4] = {0};
-	
-	for(UINT b=0; b < NumBuffers; b++)
-	{
-		setbufs[b] = ppSOTargets[b];
-		setoffs[b] = pOffsets[b];
-	}
+  ID3D11Buffer *bufs[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {0};
+  for(UINT i = 0; i < NumBuffers; i++)
+  {
+    if(ppSOTargets && ppSOTargets[i])
+    {
+      // technically this isn't dirty until the draw call, but let's be conservative
+      // to avoid having to track "possibly" dirty resources.
+      // Besides, it's unlikely an application will set an output then not draw to it
+      if(IsActiveCapturing(m_State))
+        MarkResourceReferenced(GetIDForDeviceChild(ppSOTargets[i]), eFrameRef_PartialWrite);
 
-	// end stream-out queries for outgoing targets
-	for(UINT b=0; b < 4; b++)
-	{
-		ID3D11Buffer *buf = m_CurrentPipelineState->SO.Buffers[b];
+      MarkDirtyResource(GetIDForDeviceChild(ppSOTargets[i]));
+      bufs[i] = UNWRAP(WrappedID3D11Buffer, ppSOTargets[i]);
+    }
+  }
 
-		if(buf)
-		{
-			ResourceId id = GetIDForResource(buf);
+  SERIALISE_TIME_CALL(m_pRealContext->SOSetTargets(NumBuffers, bufs, pOffsets));
 
-			m_pRealContext->End(m_StreamOutCounters[id].query);
-			m_StreamOutCounters[id].running = false;
-		}
-	}
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::SOSetTargets);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_SOSetTargets(GET_SERIALISER, NumBuffers, ppSOTargets, pOffsets);
 
-	// start new queries for incoming targets
-	for(UINT b=0; b < 4; b++)
-	{
-		ID3D11Buffer *buf = setbufs[b];
+    m_ContextRecord->AddChunk(scope.Get());
+  }
 
-		if(buf)
-		{
-			ResourceId id = GetIDForResource(buf);
+  // "If less than four [buffers] are defined by the call, the remaining buffer slots are set to
+  // NULL."
+  ID3D11Buffer *setbufs[D3D11_SO_STREAM_COUNT] = {0};
+  UINT setoffs[D3D11_SO_STREAM_COUNT] = {0};
 
-			// release any previous query as the hidden counter is overwritten
-			SAFE_RELEASE(m_StreamOutCounters[id].query);
+  for(UINT b = 0; b < NumBuffers; b++)
+  {
+    setbufs[b] = ppSOTargets ? ppSOTargets[b] : NULL;
+    // passing NULL for pOffsets seems to act like -1 => append
+    setoffs[b] = pOffsets ? pOffsets[b] : ~0U;
+  }
 
-			D3D11_QUERY queryTypes[] = {
-				D3D11_QUERY_SO_STATISTICS_STREAM0,
-				D3D11_QUERY_SO_STATISTICS_STREAM1,
-				D3D11_QUERY_SO_STATISTICS_STREAM2,
-				D3D11_QUERY_SO_STATISTICS_STREAM3,
-			};
-			
-			D3D11_QUERY_DESC qdesc;
-			qdesc.MiscFlags = 0;
-			qdesc.Query = queryTypes[b];
+  // end stream-out queries for outgoing targets
+  for(UINT b = 0; b < D3D11_SO_STREAM_COUNT; b++)
+  {
+    ID3D11Buffer *buf = m_CurrentPipelineState->SO.Buffers[b];
 
-			m_pDevice->GetReal()->CreateQuery(&qdesc, &m_StreamOutCounters[id].query);
+    if(buf)
+    {
+      ResourceId id = GetIDForDeviceChild(buf);
 
-			m_pRealContext->Begin(m_StreamOutCounters[id].query);
-			m_StreamOutCounters[id].running = true;
-		}
-	}
+      if(m_StreamOutCounters[id].running)
+      {
+        m_pRealContext->End(m_StreamOutCounters[id].query);
+        m_StreamOutCounters[id].running = false;
+      }
+    }
+  }
 
-	// "If less than four [buffers] are defined by the call, the remaining buffer slots are set to NULL."
-	m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->SO.Buffers, setbufs, 0, 4);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->SO.Offsets, setoffs, 0, 4);
+  // start new queries for incoming targets
+  for(UINT b = 0; b < D3D11_SO_STREAM_COUNT; b++)
+  {
+    ID3D11Buffer *buf = setbufs[b];
 
-	ID3D11Buffer *bufs[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {0};
-	for(UINT i=0; i < NumBuffers; i++)
-	{
-		if(ppSOTargets && ppSOTargets[i])
-		{
-			// technically this isn't dirty until the draw call, but let's be conservative
-			// to avoid having to track "possibly" dirty resources.
-			// Besides, it's unlikely an application will set an output then not draw to it
-			if(m_State >= WRITING_CAPFRAME)
-			{
-				MarkResourceReferenced(GetIDForResource(ppSOTargets[i]), eFrameRef_Write);
+    if(buf)
+    {
+      ResourceId id = GetIDForDeviceChild(buf);
 
-				if(m_State == WRITING_CAPFRAME)
-					m_MissingTracks.insert(GetIDForResource(ppSOTargets[i]));
-				if(m_State == WRITING_IDLE)
-					m_pDevice->GetResourceManager()->MarkDirtyResource(GetIDForResource(ppSOTargets[i]));
-			}
-			bufs[i] = UNWRAP(WrappedID3D11Buffer, ppSOTargets[i]);
-		}
-	}
+      // release any previous query as the hidden counter is overwritten
+      SAFE_RELEASE(m_StreamOutCounters[id].query);
 
-	m_pRealContext->SOSetTargets(NumBuffers, bufs, pOffsets);
-	VerifyState();
+      D3D11_QUERY queryTypes[] = {
+          D3D11_QUERY_SO_STATISTICS_STREAM0, D3D11_QUERY_SO_STATISTICS_STREAM1,
+          D3D11_QUERY_SO_STATISTICS_STREAM2, D3D11_QUERY_SO_STATISTICS_STREAM3,
+      };
+
+      D3D11_QUERY_DESC qdesc;
+      qdesc.MiscFlags = 0;
+      qdesc.Query = queryTypes[b];
+
+      m_pDevice->GetReal()->CreateQuery(&qdesc, &m_StreamOutCounters[id].query);
+
+      m_pRealContext->Begin(m_StreamOutCounters[id].query);
+      m_StreamOutCounters[id].running = true;
+    }
+  }
+
+  m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->SO.Buffers, setbufs, 0,
+                                         D3D11_SO_STREAM_COUNT);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->SO.Offsets, setoffs, 0,
+                                 D3D11_SO_STREAM_COUNT);
+
+  VerifyState();
 }
 
 #pragma endregion Stream Out
@@ -2156,4192 +2374,4784 @@ void WrappedID3D11DeviceContext::SOSetTargets(UINT NumBuffers, ID3D11Buffer *con
 
 void WrappedID3D11DeviceContext::RSGetViewports(UINT *pNumViewports, D3D11_VIEWPORT *pViewports)
 {
-	m_pRealContext->RSGetViewports(pNumViewports, pViewports);
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	if(pViewports)
-		RDCASSERT(memcmp(pViewports, m_CurrentPipelineState->RS.Viewports, sizeof(D3D11_VIEWPORT)* (*pNumViewports)) == 0);
+  m_pRealContext->RSGetViewports(pNumViewports, pViewports);
+
+  if(pViewports)
+    RDCASSERT(memcmp(pViewports, m_CurrentPipelineState->RS.Viewports,
+                     sizeof(D3D11_VIEWPORT) * (*pNumViewports)) == 0);
 }
 
 void WrappedID3D11DeviceContext::RSGetScissorRects(UINT *pNumRects, D3D11_RECT *pRects)
 {
-	m_pRealContext->RSGetScissorRects(pNumRects, pRects);
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	if(pRects)
-		RDCASSERT(memcmp(pRects, m_CurrentPipelineState->RS.Scissors, sizeof(D3D11_RECT)* (*pNumRects)) == 0);
+  m_pRealContext->RSGetScissorRects(pNumRects, pRects);
+
+  if(pRects)
+    RDCASSERT(memcmp(pRects, m_CurrentPipelineState->RS.Scissors,
+                     sizeof(D3D11_RECT) * (*pNumRects)) == 0);
 }
 
 void WrappedID3D11DeviceContext::RSGetState(ID3D11RasterizerState **ppRasterizerState)
 {
-	if(ppRasterizerState)
-	{
-		ID3D11RasterizerState *real = NULL;
-		m_pRealContext->RSGetState(&real);
+  if(ppRasterizerState)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		if(real != NULL)
-		{
-			real->Release();
-			ID3D11DeviceChild *state = m_pDevice->GetResourceManager()->GetWrapper(real);
-			if(WrappedID3D11RasterizerState1::IsAlloc(state))
-			{
-				*ppRasterizerState = (ID3D11RasterizerState *)(ID3D11RasterizerState1 *)state;
-				(*ppRasterizerState)->AddRef();
-			}
-			else
-			{
-				*ppRasterizerState = (ID3D11RasterizerState *)state;
-				(*ppRasterizerState)->AddRef();
-			}
-		}
-		else
-		{
-			*ppRasterizerState = NULL;
-		}
+    ID3D11RasterizerState *real = NULL;
+    m_pRealContext->RSGetState(&real);
 
-		RDCASSERT(*ppRasterizerState == m_CurrentPipelineState->RS.State);
-	}
+    if(real != NULL)
+    {
+      real->Release();
+      ID3D11DeviceChild *state = m_pDevice->GetResourceManager()->GetWrapper(real);
+      *ppRasterizerState = (ID3D11RasterizerState *)state;
+      (*ppRasterizerState)->AddRef();
+    }
+    else
+    {
+      *ppRasterizerState = NULL;
+    }
+
+    RDCASSERT(*ppRasterizerState == m_CurrentPipelineState->RS.State);
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_RSSetViewports(UINT NumViewports_, const D3D11_VIEWPORT *pViewports)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_RSSetViewports(SerialiserType &ser, UINT NumViewports,
+                                                          const D3D11_VIEWPORT *pViewports)
 {
-	SERIALISE_ELEMENT(uint32_t, NumViewports, NumViewports_);
+  SERIALISE_ELEMENT(NumViewports);
+  SERIALISE_ELEMENT_ARRAY(pViewports, NumViewports);
 
-	D3D11_VIEWPORT views[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumViewports; i++)
-	{
-		D3D11_VIEWPORT view;
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordViewportStats(NumViewports, pViewports);
 
-		if(pViewports)
-			view = pViewports[i];
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->RS.Viewports, pViewports, 0, NumViewports);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->RS.NumViews, NumViewports);
+    m_pRealContext->RSSetViewports(NumViewports, pViewports);
+    VerifyState();
+  }
 
-		m_pSerialiser->SerialisePODArray<6>((string("Viewport[") + ToStr::Get(i) + "]").c_str(), (FLOAT *)&view);
-
-		views[i] = view;
-	}
-	
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->RS.Viewports, views, 0, NumViewports);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->RS.NumViews, NumViewports);
-		m_pRealContext->RSSetViewports(NumViewports, views);
-		VerifyState();
-	}
-
-	return true;
+  return true;
 }
 
 void WrappedID3D11DeviceContext::RSSetViewports(UINT NumViewports, const D3D11_VIEWPORT *pViewports)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_VIEWPORTS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_RSSetViewports(NumViewports, pViewports);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->RS.Viewports, pViewports, 0, NumViewports);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->RS.NumViews, NumViewports);
-	m_pRealContext->RSSetViewports(NumViewports, pViewports);
-	VerifyState();
+  m_EmptyCommandList = false;
+
+  SERIALISE_TIME_CALL(m_pRealContext->RSSetViewports(NumViewports, pViewports));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::RSSetViewports);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_RSSetViewports(GET_SERIALISER, NumViewports, pViewports);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->RS.Viewports, pViewports, 0, NumViewports);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->RS.NumViews, NumViewports);
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_RSSetScissorRects(UINT NumRects_, const D3D11_RECT *pRects_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_RSSetScissorRects(SerialiserType &ser, UINT NumRects,
+                                                             const D3D11_RECT *pRects)
 {
-	SERIALISE_ELEMENT(uint32_t, NumRects, NumRects_);
-	SERIALISE_ELEMENT_ARR(D3D11_RECT, Rects, pRects_, NumRects);
-	
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->RS.Scissors, Rects, 0, NumRects);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->RS.NumScissors, NumRects);
-		RSSetScissorRects(NumRects, Rects);
-		VerifyState();
-	}
+  SERIALISE_ELEMENT(NumRects);
+  SERIALISE_ELEMENT_ARRAY(pRects, NumRects);
 
-	SAFE_DELETE(Rects);
+  SERIALISE_CHECK_READ_ERRORS();
 
-	return true;
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordScissorStats(NumRects, pRects);
+
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->RS.Scissors, pRects, 0, NumRects);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->RS.NumScissors, NumRects);
+    m_pRealContext->RSSetScissorRects(NumRects, pRects);
+    VerifyState();
+  }
+
+  return true;
 }
 
 void WrappedID3D11DeviceContext::RSSetScissorRects(UINT NumRects, const D3D11_RECT *pRects)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_SCISSORS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_RSSetScissorRects(NumRects, pRects);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->RS.Scissors, pRects, 0, NumRects);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->RS.NumScissors, NumRects);
-	m_pRealContext->RSSetScissorRects(NumRects, pRects);
-	VerifyState();
+  m_EmptyCommandList = false;
+
+  SERIALISE_TIME_CALL(m_pRealContext->RSSetScissorRects(NumRects, pRects));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::RSSetScissorRects);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_RSSetScissorRects(GET_SERIALISER, NumRects, pRects);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->RS.Scissors, pRects, 0, NumRects);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->RS.NumScissors, NumRects);
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_RSSetState(ID3D11RasterizerState *pRasterizerState)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_RSSetState(SerialiserType &ser,
+                                                      ID3D11RasterizerState *pRasterizerState)
 {
-	SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(pRasterizerState));
-	
-	if(m_State <= EXECUTING)
-	{
-		ID3D11DeviceChild *live = NULL;
-		if(m_pDevice->GetResourceManager()->HasLiveResource(id))
-			live = m_pDevice->GetResourceManager()->GetLiveResource(id);
+  SERIALISE_ELEMENT(pRasterizerState);
 
-		if(WrappedID3D11RasterizerState1::IsAlloc(live))
-		{
-			ID3D11RasterizerState1 *state = (ID3D11RasterizerState1 *)live;
-			m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->RS.State, (ID3D11RasterizerState *)state);
-			m_pRealContext->RSSetState((ID3D11RasterizerState *)UNWRAP(WrappedID3D11RasterizerState1, state));
-		}
-		else
-		{
-			ID3D11RasterizerState *state = (ID3D11RasterizerState *)live;
-			m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->RS.State, state);
-			m_pRealContext->RSSetState(UNWRAP(WrappedID3D11RasterizerState, state));
-		}
-		VerifyState();
-	}
+  SERIALISE_CHECK_READ_ERRORS();
 
-	return true;
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordRasterizationStats(pRasterizerState);
+
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->RS.State, pRasterizerState);
+    m_pRealContext->RSSetState(UNWRAP(WrappedID3D11RasterizerState2, pRasterizerState));
+    VerifyState();
+  }
+
+  return true;
 }
 
 void WrappedID3D11DeviceContext::RSSetState(ID3D11RasterizerState *pRasterizerState)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_RASTER);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_RSSetState(pRasterizerState);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
+  m_EmptyCommandList = false;
 
-	RDCASSERT(!pRasterizerState || WrappedID3D11RasterizerState::IsAlloc(pRasterizerState) || WrappedID3D11RasterizerState1::IsAlloc(pRasterizerState));
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->RS.State, pRasterizerState);
-	if(!pRasterizerState || WrappedID3D11RasterizerState::IsAlloc(pRasterizerState))
-		m_pRealContext->RSSetState(UNWRAP(WrappedID3D11RasterizerState, pRasterizerState));
-	else
-		m_pRealContext->RSSetState((ID3D11RasterizerState *)UNWRAP(WrappedID3D11RasterizerState1, pRasterizerState));
+  SERIALISE_TIME_CALL(m_pRealContext->RSSetState(
+      (ID3D11RasterizerState *)UNWRAP(WrappedID3D11RasterizerState2, pRasterizerState)));
 
-	VerifyState();
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::RSSetState);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_RSSetState(GET_SERIALISER, pRasterizerState);
+
+    MarkResourceReferenced(GetIDForDeviceChild(pRasterizerState), eFrameRef_Read);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->RS.State, pRasterizerState);
+
+  VerifyState();
 }
 
 #pragma endregion Rasterizer
 
 #pragma region Pixel Shader
 
-void WrappedID3D11DeviceContext::PSGetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D11Buffer **ppConstantBuffers)
+void WrappedID3D11DeviceContext::PSGetConstantBuffers(UINT StartSlot, UINT NumBuffers,
+                                                      ID3D11Buffer **ppConstantBuffers)
 {
-	if(ppConstantBuffers)
-	{
-		ID3D11Buffer *real[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
-		m_pRealContext->PSGetConstantBuffers(StartSlot, NumBuffers, real);
-	
-		for(UINT i=0; i < NumBuffers; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppConstantBuffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppConstantBuffers[i]);
+  if(ppConstantBuffers)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-			RDCASSERT(ppConstantBuffers[i] == m_CurrentPipelineState->PS.ConstantBuffers[i+StartSlot]);
-		}
-	}
+    ID3D11Buffer *real[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
+    m_pRealContext->PSGetConstantBuffers(StartSlot, NumBuffers, real);
+
+    for(UINT i = 0; i < NumBuffers; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppConstantBuffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppConstantBuffers[i]);
+
+      RDCASSERT(ppConstantBuffers[i] == m_CurrentPipelineState->PS.ConstantBuffers[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::PSGetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView **ppShaderResourceViews)
+void WrappedID3D11DeviceContext::PSGetShaderResources(UINT StartSlot, UINT NumViews,
+                                                      ID3D11ShaderResourceView **ppShaderResourceViews)
 {
-	if(ppShaderResourceViews)
-	{
-		ID3D11ShaderResourceView *real[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {0};
-		m_pRealContext->PSGetShaderResources(StartSlot, NumViews, real);
+  if(ppShaderResourceViews)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		for(UINT i=0; i < NumViews; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppShaderResourceViews[i] = (ID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppShaderResourceViews[i]);
+    ID3D11ShaderResourceView *real[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {0};
+    m_pRealContext->PSGetShaderResources(StartSlot, NumViews, real);
 
-			RDCASSERT(ppShaderResourceViews[i] == m_CurrentPipelineState->PS.SRVs[i+StartSlot]);
-		}
-	}
+    for(UINT i = 0; i < NumViews; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppShaderResourceViews[i] =
+          (ID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppShaderResourceViews[i]);
+
+      RDCASSERT(ppShaderResourceViews[i] == m_CurrentPipelineState->PS.SRVs[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::PSGetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState **ppSamplers)
+void WrappedID3D11DeviceContext::PSGetSamplers(UINT StartSlot, UINT NumSamplers,
+                                               ID3D11SamplerState **ppSamplers)
 {
-	if(ppSamplers)
-	{
-		ID3D11SamplerState *real[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {0};
-		m_pRealContext->PSGetSamplers(StartSlot, NumSamplers, real);
+  if(ppSamplers)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		for(UINT i=0; i < NumSamplers; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppSamplers[i] = (ID3D11SamplerState *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppSamplers[i]);
+    ID3D11SamplerState *real[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {0};
+    m_pRealContext->PSGetSamplers(StartSlot, NumSamplers, real);
 
-			RDCASSERT(ppSamplers[i] == m_CurrentPipelineState->PS.Samplers[i+StartSlot]);
-		}
-	}
+    for(UINT i = 0; i < NumSamplers; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppSamplers[i] = (ID3D11SamplerState *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppSamplers[i]);
+
+      RDCASSERT(ppSamplers[i] == m_CurrentPipelineState->PS.Samplers[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::PSGetShader(ID3D11PixelShader **ppPixelShader, ID3D11ClassInstance **ppClassInstances, UINT *pNumClassInstances)
+void WrappedID3D11DeviceContext::PSGetShader(ID3D11PixelShader **ppPixelShader,
+                                             ID3D11ClassInstance **ppClassInstances,
+                                             UINT *pNumClassInstances)
 {
-	if(ppPixelShader == NULL && ppClassInstances == NULL && pNumClassInstances == NULL)
-		return;
-	
-	ID3D11ClassInstance *realInsts[D3D11_SHADER_MAX_INTERFACES] = {0};
-	UINT numInsts = 0;
-	ID3D11PixelShader *realShader = NULL;
-	m_pRealContext->PSGetShader(&realShader, realInsts, &numInsts);
-	
-	SAFE_RELEASE_NOCLEAR(realShader);
-	for(UINT i=0; i < numInsts; i++)
-		SAFE_RELEASE_NOCLEAR(realInsts[i]);
+  if(ppPixelShader == NULL && ppClassInstances == NULL && pNumClassInstances == NULL)
+    return;
 
-	if(ppPixelShader)
-	{
-		*ppPixelShader = (ID3D11PixelShader *)m_pDevice->GetResourceManager()->GetWrapper(realShader);
-		SAFE_ADDREF(*ppPixelShader);
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		RDCASSERT(*ppPixelShader == m_CurrentPipelineState->PS.Shader);
-	}
+  ID3D11ClassInstance *realInsts[D3D11_SHADER_MAX_INTERFACES] = {0};
+  UINT numInsts = 0;
+  ID3D11PixelShader *realShader = NULL;
+  m_pRealContext->PSGetShader(&realShader, realInsts, &numInsts);
 
-	if(ppClassInstances)
-	{
-		for(UINT i=0; i < numInsts; i++)
-		{
-			ppClassInstances[i] = (ID3D11ClassInstance *)m_pDevice->GetResourceManager()->GetWrapper(realInsts[i]);
-			SAFE_ADDREF(ppClassInstances[i]);
+  SAFE_RELEASE_NOCLEAR(realShader);
+  for(UINT i = 0; i < numInsts; i++)
+    SAFE_RELEASE_NOCLEAR(realInsts[i]);
 
-			RDCASSERT(ppClassInstances[i] == m_CurrentPipelineState->PS.Instances[i]);
-		}
-	}
+  if(ppPixelShader)
+  {
+    *ppPixelShader = (ID3D11PixelShader *)m_pDevice->GetResourceManager()->GetWrapper(realShader);
+    SAFE_ADDREF(*ppPixelShader);
 
-	if(pNumClassInstances)
-	{
-		*pNumClassInstances = numInsts;
-	}
+    RDCASSERT(*ppPixelShader == m_CurrentPipelineState->PS.Object);
+  }
+
+  if(ppClassInstances)
+  {
+    for(UINT i = 0; i < numInsts; i++)
+    {
+      ppClassInstances[i] =
+          (ID3D11ClassInstance *)m_pDevice->GetResourceManager()->GetWrapper(realInsts[i]);
+      SAFE_ADDREF(ppClassInstances[i]);
+
+      RDCASSERT(ppClassInstances[i] == m_CurrentPipelineState->PS.Instances[i]);
+    }
+  }
+
+  if(pNumClassInstances)
+  {
+    *pNumClassInstances = numInsts;
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_PSSetConstantBuffers(UINT StartSlot_, UINT NumBuffers_, ID3D11Buffer *const *ppConstantBuffers)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_PSSetConstantBuffers(SerialiserType &ser, UINT StartSlot,
+                                                                UINT NumBuffers,
+                                                                ID3D11Buffer *const *ppConstantBuffers)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumBuffers, NumBuffers_);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumBuffers);
+  SERIALISE_ELEMENT_ARRAY(ppConstantBuffers, NumBuffers);
 
-	ID3D11Buffer *Buffers[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumBuffers; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppConstantBuffers[i]));
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordConstantStats(ShaderStage::Pixel, NumBuffers, ppConstantBuffers);
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Buffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Buffers[i] = NULL;
-	}
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.ConstantBuffers,
+                                          ppConstantBuffers, StartSlot, NumBuffers);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->PS.CBOffsets, NullCBOffsets, StartSlot,
+                                   NumBuffers);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->PS.CBCounts, NullCBCounts, StartSlot,
+                                   NumBuffers);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.ConstantBuffers, Buffers, StartSlot, NumBuffers);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->PS.CBOffsets, NullCBOffsets, StartSlot, NumBuffers);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->PS.CBCounts, NullCBCounts, StartSlot, NumBuffers);
+    ID3D11Buffer *bufs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
+    for(UINT i = 0; i < NumBuffers; i++)
+      bufs[i] = UNWRAP(WrappedID3D11Buffer, ppConstantBuffers[i]);
 
-		for(UINT i=0; i < NumBuffers; i++)
-			Buffers[i] = UNWRAP(WrappedID3D11Buffer, Buffers[i]);
+    m_pRealContext->PSSetConstantBuffers(StartSlot, NumBuffers, bufs);
+    VerifyState();
+  }
 
-		m_pRealContext->PSSetConstantBuffers(StartSlot, NumBuffers, Buffers);
-		VerifyState();
-	}
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::PSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D11Buffer *const *ppConstantBuffers)
+void WrappedID3D11DeviceContext::PSSetConstantBuffers(UINT StartSlot, UINT NumBuffers,
+                                                      ID3D11Buffer *const *ppConstantBuffers)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_PS_CBUFFERS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_PSSetConstantBuffers(StartSlot, NumBuffers, ppConstantBuffers);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.ConstantBuffers, ppConstantBuffers, StartSlot, NumBuffers);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->PS.CBOffsets, NullCBOffsets, StartSlot, NumBuffers);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->PS.CBCounts, NullCBCounts, StartSlot, NumBuffers);
+  m_EmptyCommandList = false;
 
-	ID3D11Buffer *bufs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
-	for(UINT i=0; i < NumBuffers; i++)
-	{
-		if(ppConstantBuffers[i] && m_State >= WRITING_CAPFRAME)
-			MarkResourceReferenced(GetIDForResource(ppConstantBuffers[i]), eFrameRef_Read);
+  ID3D11Buffer *bufs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
+  for(UINT i = 0; i < NumBuffers; i++)
+  {
+    if(ppConstantBuffers[i] && IsActiveCapturing(m_State))
+      MarkResourceReferenced(GetIDForDeviceChild(ppConstantBuffers[i]), eFrameRef_Read);
 
-		bufs[i] = UNWRAP(WrappedID3D11Buffer, ppConstantBuffers[i]);
-	}
+    bufs[i] = UNWRAP(WrappedID3D11Buffer, ppConstantBuffers[i]);
+  }
 
-	m_pRealContext->PSSetConstantBuffers(StartSlot, NumBuffers, bufs);
-	VerifyState();
+  SERIALISE_TIME_CALL(m_pRealContext->PSSetConstantBuffers(StartSlot, NumBuffers, bufs));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::PSSetConstantBuffers);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_PSSetConstantBuffers(GET_SERIALISER, StartSlot, NumBuffers, ppConstantBuffers);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.ConstantBuffers,
+                                        ppConstantBuffers, StartSlot, NumBuffers);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->PS.CBOffsets, NullCBOffsets, StartSlot,
+                                 NumBuffers);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->PS.CBCounts, NullCBCounts, StartSlot,
+                                 NumBuffers);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_PSSetShaderResources(UINT StartSlot_, UINT NumViews_, ID3D11ShaderResourceView *const *ppShaderResourceViews)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_PSSetShaderResources(
+    SerialiserType &ser, UINT StartSlot, UINT NumViews,
+    ID3D11ShaderResourceView *const *ppShaderResourceViews)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumViews, NumViews_);
-	
-	ID3D11ShaderResourceView *Views[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumViews);
+  SERIALISE_ELEMENT_ARRAY(ppShaderResourceViews, NumViews);
 
-	for(UINT i=0; i < NumViews; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppShaderResourceViews[i]));
+  SERIALISE_CHECK_READ_ERRORS();
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Views[i] = (ID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Views[i] = NULL;
-	}
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordResourceStats(ShaderStage::Pixel, NumViews, ppShaderResourceViews);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.SRVs, Views, StartSlot, NumViews);
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.SRVs, ppShaderResourceViews,
+                                          StartSlot, NumViews);
 
-		for(UINT i=0; i < NumViews; i++)
-			Views[i] = UNWRAP(WrappedID3D11ShaderResourceView, Views[i]);
+    ID3D11ShaderResourceView *SRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
+    for(UINT i = 0; i < NumViews; i++)
+      SRVs[i] = UNWRAP(WrappedID3D11ShaderResourceView1, ppShaderResourceViews[i]);
 
-		m_pRealContext->PSSetShaderResources(StartSlot, NumViews, Views);
-		VerifyState();
-	}
+    m_pRealContext->PSSetShaderResources(StartSlot, NumViews, SRVs);
+    VerifyState();
+  }
 
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::PSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView *const *ppShaderResourceViews)
+void WrappedID3D11DeviceContext::PSSetShaderResources(
+    UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView *const *ppShaderResourceViews)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_PS_RESOURCES);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_PSSetShaderResources(StartSlot, NumViews, ppShaderResourceViews);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.SRVs, ppShaderResourceViews, StartSlot, NumViews);
-	
-	ID3D11ShaderResourceView *SRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
-	for(UINT i=0; i < NumViews; i++)
-	{
-		if(ppShaderResourceViews[i] && m_State >= WRITING_CAPFRAME)
-		{
-			ID3D11Resource *res = NULL;
-			ppShaderResourceViews[i]->GetResource(&res);
-			MarkResourceReferenced(GetIDForResource(ppShaderResourceViews[i]), eFrameRef_Read);
-			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
-			SAFE_RELEASE(res);
-		}
+  m_EmptyCommandList = false;
 
-		SRVs[i] = UNWRAP(WrappedID3D11ShaderResourceView, ppShaderResourceViews[i]);
-	}
+  ID3D11ShaderResourceView *SRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
+  for(UINT i = 0; i < NumViews; i++)
+  {
+    if(ppShaderResourceViews[i] && IsActiveCapturing(m_State))
+    {
+      MarkResourceReferenced(GetIDForDeviceChild(ppShaderResourceViews[i]), eFrameRef_Read);
+      MarkResourceReferenced(GetViewResourceResID(ppShaderResourceViews[i]), eFrameRef_Read);
+    }
 
-	m_pRealContext->PSSetShaderResources(StartSlot, NumViews, SRVs);
-	VerifyState();
+    SRVs[i] = UNWRAP(WrappedID3D11ShaderResourceView1, ppShaderResourceViews[i]);
+  }
+
+  SERIALISE_TIME_CALL(m_pRealContext->PSSetShaderResources(StartSlot, NumViews, SRVs));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::PSSetShaderResources);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_PSSetShaderResources(GET_SERIALISER, StartSlot, NumViews, ppShaderResourceViews);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.SRVs, ppShaderResourceViews,
+                                        StartSlot, NumViews);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_PSSetSamplers(UINT StartSlot_, UINT NumSamplers_, ID3D11SamplerState *const *ppSamplers)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_PSSetSamplers(SerialiserType &ser, UINT StartSlot,
+                                                         UINT NumSamplers,
+                                                         ID3D11SamplerState *const *ppSamplers)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumSamplers, NumSamplers_);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumSamplers);
+  SERIALISE_ELEMENT_ARRAY(ppSamplers, NumSamplers);
 
-	ID3D11SamplerState *Sampler[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumSamplers; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppSamplers[i]));
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordSamplerStats(ShaderStage::Pixel, NumSamplers, ppSamplers);
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Sampler[i] = (ID3D11SamplerState *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Sampler[i] = NULL;
-	}
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.Samplers, ppSamplers,
+                                          StartSlot, NumSamplers);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.Samplers, Sampler, StartSlot, NumSamplers);
+    ID3D11SamplerState *samps[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
+    for(UINT i = 0; i < NumSamplers; i++)
+      samps[i] = UNWRAP(WrappedID3D11SamplerState, ppSamplers[i]);
 
-		for(UINT i=0; i < NumSamplers; i++)
-			Sampler[i] = UNWRAP(WrappedID3D11SamplerState, Sampler[i]);
+    m_pRealContext->PSSetSamplers(StartSlot, NumSamplers, samps);
+    VerifyState();
+  }
 
-		m_pRealContext->PSSetSamplers(StartSlot, NumSamplers, Sampler);
-		VerifyState();
-	}
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::PSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState *const *ppSamplers)
+void WrappedID3D11DeviceContext::PSSetSamplers(UINT StartSlot, UINT NumSamplers,
+                                               ID3D11SamplerState *const *ppSamplers)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_PS_SAMPLERS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_PSSetSamplers(StartSlot, NumSamplers, ppSamplers);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.Samplers, ppSamplers, StartSlot, NumSamplers);
+  m_EmptyCommandList = false;
 
-	ID3D11SamplerState *samps[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
-	for(UINT i=0; i < NumSamplers; i++)
-		samps[i] = UNWRAP(WrappedID3D11SamplerState, ppSamplers[i]);
+  ID3D11SamplerState *samps[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
+  for(UINT i = 0; i < NumSamplers; i++)
+  {
+    if(ppSamplers[i] && IsActiveCapturing(m_State))
+      MarkResourceReferenced(GetIDForDeviceChild(ppSamplers[i]), eFrameRef_Read);
 
-	m_pRealContext->PSSetSamplers(StartSlot, NumSamplers, samps);
-	VerifyState();
+    samps[i] = UNWRAP(WrappedID3D11SamplerState, ppSamplers[i]);
+  }
+
+  SERIALISE_TIME_CALL(m_pRealContext->PSSetSamplers(StartSlot, NumSamplers, samps));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::PSSetSamplers);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_PSSetSamplers(GET_SERIALISER, StartSlot, NumSamplers, ppSamplers);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.Samplers, ppSamplers, StartSlot,
+                                        NumSamplers);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_PSSetShader(ID3D11PixelShader *pShader, ID3D11ClassInstance *const *ppClassInstances, UINT NumClassInstances_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_PSSetShader(SerialiserType &ser,
+                                                       ID3D11PixelShader *pShader,
+                                                       ID3D11ClassInstance *const *ppClassInstances,
+                                                       UINT NumClassInstances)
 {
-	SERIALISE_ELEMENT(ResourceId, Shader, GetIDForResource(pShader));
-	SERIALISE_ELEMENT(uint32_t, NumClassInstances, NumClassInstances_);
-	
-	ID3D11ClassInstance **Instances = new ID3D11ClassInstance *[NumClassInstances];
+  SERIALISE_ELEMENT(pShader);
+  SERIALISE_ELEMENT_ARRAY(ppClassInstances, NumClassInstances);
+  SERIALISE_ELEMENT(NumClassInstances);
 
-	for(UINT i=0; i < NumClassInstances; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppClassInstances[i]));
+  SERIALISE_CHECK_READ_ERRORS();
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Instances[i] = (ID3D11ClassInstance *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Instances[i] = NULL;
-	}
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordShaderStats(ShaderStage::Pixel, m_CurrentPipelineState->PS.Object, pShader);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.Instances, Instances, 0, NumClassInstances);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->PS.NumInstances, NumClassInstances);
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.Instances, ppClassInstances, 0,
+                                          NumClassInstances);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->PS.NumInstances, NumClassInstances);
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.Object,
+                                          (ID3D11DeviceChild *)pShader);
 
-		for(UINT i=0; i < NumClassInstances; i++)
-			Instances[i] = UNWRAP(WrappedID3D11ClassInstance, Instances[i]);
+    ID3D11ClassInstance *insts[D3D11_SHADER_MAX_INTERFACES] = {0};
+    for(UINT i = 0; i < NumClassInstances; i++)
+      insts[i] = UNWRAP(WrappedID3D11ClassInstance, ppClassInstances[i]);
 
-		ID3D11DeviceChild *pSH = NULL;
-		if(m_pDevice->GetResourceManager()->HasLiveResource(Shader))
-			pSH = (ID3D11DeviceChild *)m_pDevice->GetResourceManager()->GetLiveResource(Shader);
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.Shader, pSH);
-		m_pRealContext->PSSetShader(UNWRAP(WrappedID3D11Shader<ID3D11PixelShader>, pSH), Instances, NumClassInstances);
-		VerifyState();
-	}
+    m_pRealContext->PSSetShader(UNWRAP(WrappedID3D11Shader<ID3D11PixelShader>, pShader), insts,
+                                NumClassInstances);
+    VerifyState();
+  }
 
-	SAFE_DELETE_ARRAY(Instances);
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::PSSetShader(ID3D11PixelShader *pPixelShader, ID3D11ClassInstance *const *ppClassInstances, UINT NumClassInstances)
+void WrappedID3D11DeviceContext::PSSetShader(ID3D11PixelShader *pPixelShader,
+                                             ID3D11ClassInstance *const *ppClassInstances,
+                                             UINT NumClassInstances)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_PS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_PSSetShader(pPixelShader, ppClassInstances, NumClassInstances);
-		
-		MarkResourceReferenced(GetIDForResource(pPixelShader), eFrameRef_Read);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.Shader, (ID3D11DeviceChild *)pPixelShader);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->PS.NumInstances, NumClassInstances);
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.Instances, ppClassInstances, 0, NumClassInstances);
-	
-	ID3D11ClassInstance *insts[D3D11_SHADER_MAX_INTERFACES] = {0};
-	if(ppClassInstances && NumClassInstances > 0)
-		for(UINT i=0; i < NumClassInstances; i++)
-			insts[i] = UNWRAP(WrappedID3D11ClassInstance, ppClassInstances[i]);
-	
-	m_pRealContext->PSSetShader(UNWRAP(WrappedID3D11Shader<ID3D11PixelShader>, pPixelShader), insts, NumClassInstances);
-	VerifyState();
+  m_EmptyCommandList = false;
+
+  ID3D11ClassInstance *insts[D3D11_SHADER_MAX_INTERFACES] = {0};
+  if(ppClassInstances && NumClassInstances > 0)
+    for(UINT i = 0; i < NumClassInstances; i++)
+      insts[i] = UNWRAP(WrappedID3D11ClassInstance, ppClassInstances[i]);
+
+  SERIALISE_TIME_CALL(m_pRealContext->PSSetShader(
+      UNWRAP(WrappedID3D11Shader<ID3D11PixelShader>, pPixelShader), insts, NumClassInstances));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::PSSetShader);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_PSSetShader(GET_SERIALISER, pPixelShader, ppClassInstances, NumClassInstances);
+
+    MarkResourceReferenced(GetIDForDeviceChild(pPixelShader), eFrameRef_Read);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.Object,
+                                        (ID3D11DeviceChild *)pPixelShader);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->PS.NumInstances, NumClassInstances);
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->PS.Instances, ppClassInstances, 0,
+                                        NumClassInstances);
+
+  VerifyState();
 }
 
 #pragma endregion Pixel Shader
 
 #pragma region Output Merger
 
-void WrappedID3D11DeviceContext::OMGetRenderTargets(UINT NumViews, ID3D11RenderTargetView **ppRenderTargetViews, ID3D11DepthStencilView **ppDepthStencilView)
+void WrappedID3D11DeviceContext::OMGetRenderTargets(UINT NumViews,
+                                                    ID3D11RenderTargetView **ppRenderTargetViews,
+                                                    ID3D11DepthStencilView **ppDepthStencilView)
 {
-	if(ppRenderTargetViews == NULL && ppDepthStencilView == NULL)
-		return;
+  if(ppRenderTargetViews == NULL && ppDepthStencilView == NULL)
+    return;
 
-	ID3D11RenderTargetView *rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
-	ID3D11DepthStencilView *dsv = NULL;
-	m_pRealContext->OMGetRenderTargets(NumViews, rtv, &dsv);
-	
-	for(UINT i=0; i < NumViews; i++)
-		SAFE_RELEASE_NOCLEAR(rtv[i]);
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	SAFE_RELEASE_NOCLEAR(dsv);
+  ID3D11RenderTargetView *rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
+  ID3D11DepthStencilView *dsv = NULL;
+  m_pRealContext->OMGetRenderTargets(NumViews, rtv, &dsv);
 
-	if(ppRenderTargetViews)
-	{
-		for(UINT i=0; i < NumViews; i++)
-		{
-			ppRenderTargetViews[i] = (ID3D11RenderTargetView *)m_pDevice->GetResourceManager()->GetWrapper(rtv[i]);
-			SAFE_ADDREF(ppRenderTargetViews[i]);
+  for(UINT i = 0; i < NumViews; i++)
+    SAFE_RELEASE_NOCLEAR(rtv[i]);
 
-			RDCASSERT(ppRenderTargetViews[i] == m_CurrentPipelineState->OM.RenderTargets[i]);
-		}
-	}
+  SAFE_RELEASE_NOCLEAR(dsv);
 
-	if(ppDepthStencilView)
-	{
-		*ppDepthStencilView = (ID3D11DepthStencilView *)m_pDevice->GetResourceManager()->GetWrapper(dsv);
-		SAFE_ADDREF(*ppDepthStencilView);
+  if(ppRenderTargetViews)
+  {
+    for(UINT i = 0; i < NumViews; i++)
+    {
+      ppRenderTargetViews[i] =
+          (ID3D11RenderTargetView *)m_pDevice->GetResourceManager()->GetWrapper(rtv[i]);
+      SAFE_ADDREF(ppRenderTargetViews[i]);
 
-		RDCASSERT(*ppDepthStencilView == m_CurrentPipelineState->OM.DepthView);
-	}
+      RDCASSERT(ppRenderTargetViews[i] == m_CurrentPipelineState->OM.RenderTargets[i]);
+    }
+  }
+
+  if(ppDepthStencilView)
+  {
+    *ppDepthStencilView = (ID3D11DepthStencilView *)m_pDevice->GetResourceManager()->GetWrapper(dsv);
+    SAFE_ADDREF(*ppDepthStencilView);
+
+    RDCASSERT(*ppDepthStencilView == m_CurrentPipelineState->OM.DepthView);
+  }
 }
 
-void WrappedID3D11DeviceContext::OMGetRenderTargetsAndUnorderedAccessViews(UINT NumRTVs, ID3D11RenderTargetView **ppRenderTargetViews,
-												ID3D11DepthStencilView **ppDepthStencilView,
-												UINT UAVStartSlot, UINT NumUAVs, ID3D11UnorderedAccessView **ppUnorderedAccessViews)
+void WrappedID3D11DeviceContext::OMGetRenderTargetsAndUnorderedAccessViews(
+    UINT NumRTVs, ID3D11RenderTargetView **ppRenderTargetViews,
+    ID3D11DepthStencilView **ppDepthStencilView, UINT UAVStartSlot, UINT NumUAVs,
+    ID3D11UnorderedAccessView **ppUnorderedAccessViews)
 {
-	if(ppRenderTargetViews == NULL && ppDepthStencilView == NULL && ppUnorderedAccessViews == NULL)
-		return;
-	
-	ID3D11RenderTargetView *rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
-	ID3D11UnorderedAccessView *uav[D3D11_1_UAV_SLOT_COUNT] = {0};
-	ID3D11DepthStencilView *dsv = NULL;
-	m_pRealContext->OMGetRenderTargetsAndUnorderedAccessViews(NumRTVs, rtv, &dsv, UAVStartSlot, NumUAVs, uav);
-	
-	for(UINT i=0; i < NumRTVs; i++)
-		SAFE_RELEASE_NOCLEAR(rtv[i]);
+  if(ppRenderTargetViews == NULL && ppDepthStencilView == NULL && ppUnorderedAccessViews == NULL)
+    return;
 
-	SAFE_RELEASE_NOCLEAR(dsv);
-	
-	for(UINT i=0; i < NumUAVs; i++)
-		SAFE_RELEASE_NOCLEAR(uav[i]);
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	if(ppRenderTargetViews)
-	{
-		for(UINT i=0; i < NumRTVs; i++)
-		{
-			ppRenderTargetViews[i] = (ID3D11RenderTargetView *)m_pDevice->GetResourceManager()->GetWrapper(rtv[i]);
-			SAFE_ADDREF(ppRenderTargetViews[i]);
+  ID3D11RenderTargetView *rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
+  ID3D11UnorderedAccessView *uav[D3D11_1_UAV_SLOT_COUNT] = {0};
+  ID3D11DepthStencilView *dsv = NULL;
+  m_pRealContext->OMGetRenderTargetsAndUnorderedAccessViews(NumRTVs, rtv, &dsv, UAVStartSlot,
+                                                            NumUAVs, uav);
 
-			RDCASSERT(ppRenderTargetViews[i] == m_CurrentPipelineState->OM.RenderTargets[i]);
-		}
-	}
+  for(UINT i = 0; i < NumRTVs; i++)
+    SAFE_RELEASE_NOCLEAR(rtv[i]);
 
-	if(ppDepthStencilView)
-	{
-		*ppDepthStencilView = (ID3D11DepthStencilView *)m_pDevice->GetResourceManager()->GetWrapper(dsv);
-		SAFE_ADDREF(*ppDepthStencilView);
+  SAFE_RELEASE_NOCLEAR(dsv);
 
-		RDCASSERT(*ppDepthStencilView == m_CurrentPipelineState->OM.DepthView);
-	}
-	
-	if(ppUnorderedAccessViews)
-	{
-		for(UINT i=0; i < NumUAVs; i++)
-		{
-			ppUnorderedAccessViews[i] = (ID3D11UnorderedAccessView *)m_pDevice->GetResourceManager()->GetWrapper(uav[i]);
-			SAFE_ADDREF(ppUnorderedAccessViews[i]);
+  for(UINT i = 0; i < NumUAVs; i++)
+    SAFE_RELEASE_NOCLEAR(uav[i]);
 
-			RDCASSERT(ppUnorderedAccessViews[i] == m_CurrentPipelineState->OM.UAVs[i]);
-		}
-	}
+  if(ppRenderTargetViews)
+  {
+    for(UINT i = 0; i < NumRTVs; i++)
+    {
+      ppRenderTargetViews[i] =
+          (ID3D11RenderTargetView *)m_pDevice->GetResourceManager()->GetWrapper(rtv[i]);
+      SAFE_ADDREF(ppRenderTargetViews[i]);
+
+      RDCASSERT(ppRenderTargetViews[i] == m_CurrentPipelineState->OM.RenderTargets[i]);
+    }
+  }
+
+  if(ppDepthStencilView)
+  {
+    *ppDepthStencilView = (ID3D11DepthStencilView *)m_pDevice->GetResourceManager()->GetWrapper(dsv);
+    SAFE_ADDREF(*ppDepthStencilView);
+
+    RDCASSERT(*ppDepthStencilView == m_CurrentPipelineState->OM.DepthView);
+  }
+
+  if(ppUnorderedAccessViews)
+  {
+    for(UINT i = 0; i < NumUAVs; i++)
+    {
+      ppUnorderedAccessViews[i] =
+          (ID3D11UnorderedAccessView *)m_pDevice->GetResourceManager()->GetWrapper(uav[i]);
+      SAFE_ADDREF(ppUnorderedAccessViews[i]);
+
+      RDCASSERT(ppUnorderedAccessViews[i] == m_CurrentPipelineState->OM.UAVs[i]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::OMGetBlendState(ID3D11BlendState **ppBlendState, FLOAT BlendFactor[4], UINT *pSampleMask)
+void WrappedID3D11DeviceContext::OMGetBlendState(ID3D11BlendState **ppBlendState,
+                                                 FLOAT BlendFactor[4], UINT *pSampleMask)
 {
-	ID3D11BlendState *real = NULL;
-	m_pRealContext->OMGetBlendState(&real, BlendFactor, pSampleMask);
-	
-	SAFE_RELEASE_NOCLEAR(real);
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	if(ppBlendState)
-	{
-		if(real != NULL)
-		{
-			ID3D11DeviceChild *state = m_pDevice->GetResourceManager()->GetWrapper(real);
-			if(WrappedID3D11BlendState1::IsAlloc(state))
-			{
-				*ppBlendState = (ID3D11BlendState *)(ID3D11BlendState1 *)state;
-				(*ppBlendState)->AddRef();
-			}
-			else
-			{
-				*ppBlendState = (ID3D11BlendState *)state;
-				(*ppBlendState)->AddRef();
-			}
-		}
-		else
-		{
-			*ppBlendState = NULL;
-		}
+  ID3D11BlendState *real = NULL;
+  m_pRealContext->OMGetBlendState(&real, BlendFactor, pSampleMask);
 
-		RDCASSERT(*ppBlendState == m_CurrentPipelineState->OM.BlendState);
-	}
-	if(BlendFactor)
-		RDCASSERT(memcmp(BlendFactor, m_CurrentPipelineState->OM.BlendFactor, sizeof(float)*4) == 0);
-	if(pSampleMask)
-		RDCASSERT(*pSampleMask == m_CurrentPipelineState->OM.SampleMask);
+  SAFE_RELEASE_NOCLEAR(real);
+
+  if(ppBlendState)
+  {
+    if(real != NULL)
+    {
+      ID3D11DeviceChild *state = m_pDevice->GetResourceManager()->GetWrapper(real);
+      *ppBlendState = (ID3D11BlendState *)state;
+      (*ppBlendState)->AddRef();
+    }
+    else
+    {
+      *ppBlendState = NULL;
+    }
+
+    RDCASSERT(*ppBlendState == m_CurrentPipelineState->OM.BlendState);
+  }
+  if(BlendFactor)
+    RDCASSERT(memcmp(BlendFactor, m_CurrentPipelineState->OM.BlendFactor, sizeof(float) * 4) == 0);
+  if(pSampleMask)
+    RDCASSERT(*pSampleMask == m_CurrentPipelineState->OM.SampleMask);
 }
 
-void WrappedID3D11DeviceContext::OMGetDepthStencilState(ID3D11DepthStencilState **ppDepthStencilState, UINT *pStencilRef)
+void WrappedID3D11DeviceContext::OMGetDepthStencilState(ID3D11DepthStencilState **ppDepthStencilState,
+                                                        UINT *pStencilRef)
 {
-	ID3D11DepthStencilState *real = NULL;
-	m_pRealContext->OMGetDepthStencilState(&real, pStencilRef);
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	SAFE_RELEASE_NOCLEAR(real);
+  ID3D11DepthStencilState *real = NULL;
+  m_pRealContext->OMGetDepthStencilState(&real, pStencilRef);
 
-	if(ppDepthStencilState)
-	{
-		if(real != NULL)
-		{
-			*ppDepthStencilState = (ID3D11DepthStencilState *)m_pDevice->GetResourceManager()->GetWrapper(real);
-			SAFE_ADDREF(*ppDepthStencilState);
-		}
-		else
-		{
-			*ppDepthStencilState = NULL;
-		}
+  SAFE_RELEASE_NOCLEAR(real);
 
-		RDCASSERT(*ppDepthStencilState == m_CurrentPipelineState->OM.DepthStencilState);
-	}
-	if(pStencilRef)
-		RDCASSERT(*pStencilRef == m_CurrentPipelineState->OM.StencRef);
+  if(ppDepthStencilState)
+  {
+    if(real != NULL)
+    {
+      *ppDepthStencilState =
+          (ID3D11DepthStencilState *)m_pDevice->GetResourceManager()->GetWrapper(real);
+      SAFE_ADDREF(*ppDepthStencilState);
+    }
+    else
+    {
+      *ppDepthStencilState = NULL;
+    }
+
+    RDCASSERT(*ppDepthStencilState == m_CurrentPipelineState->OM.DepthStencilState);
+  }
+  if(pStencilRef)
+    RDCASSERT(*pStencilRef == m_CurrentPipelineState->OM.StencRef);
 }
 
-bool WrappedID3D11DeviceContext::Serialise_OMSetRenderTargets(UINT NumViews_, ID3D11RenderTargetView *const *ppRenderTargetViews, ID3D11DepthStencilView *pDepthStencilView)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_OMSetRenderTargets(
+    SerialiserType &ser, UINT NumViews, ID3D11RenderTargetView *const *ppRenderTargetViews,
+    ID3D11DepthStencilView *pDepthStencilView)
 {
-	SERIALISE_ELEMENT(uint32_t, NumViews, NumViews_);
-	SERIALISE_ELEMENT(ResourceId, DepthStencilView, GetIDForResource(pDepthStencilView));
+  SERIALISE_ELEMENT(NumViews);
+  SERIALISE_ELEMENT_ARRAY(ppRenderTargetViews, NumViews);
+  SERIALISE_ELEMENT(pDepthStencilView);
 
-	ID3D11RenderTargetView **RenderTargetViews = new ID3D11RenderTargetView *[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
-	
-	for(UINT i=0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
-		RenderTargetViews[i] = NULL;
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumViews; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppRenderTargetViews[i]));
+  if(IsReplayingAndReading())
+  {
+    ID3D11RenderTargetView *RTs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
+    for(UINT i = 0; i < NumViews; i++)
+      RTs[i] = ppRenderTargetViews[i];
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			RenderTargetViews[i] = (ID3D11RenderTargetView *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-	}
+    if(m_CurrentPipelineState->ValidOutputMerger(ppRenderTargetViews, NumViews, pDepthStencilView,
+                                                 NULL, 0))
+    {
+      m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.RenderTargets, RTs, 0,
+                                             D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT);
+      m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.DepthView, pDepthStencilView);
+    }
 
-	if(m_State <= EXECUTING)
-	{
-		pDepthStencilView = NULL;
-		if(m_pDevice->GetResourceManager()->HasLiveResource(DepthStencilView))
-			pDepthStencilView = (ID3D11DepthStencilView *)m_pDevice->GetResourceManager()->GetLiveResource(DepthStencilView);
+    ID3D11UnorderedAccessView *UAVs[D3D11_1_UAV_SLOT_COUNT] = {0};
+    m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.UAVs, UAVs, 0,
+                                           D3D11_1_UAV_SLOT_COUNT);
 
-		if(m_CurrentPipelineState->ValidOutputMerger(RenderTargetViews, pDepthStencilView))
-		{
-			m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.RenderTargets, RenderTargetViews, 0, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT);
-			m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.DepthView, pDepthStencilView);
-		}
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.UAVStartSlot, NumViews);
 
-		ID3D11UnorderedAccessView *UAVs[D3D11_1_UAV_SLOT_COUNT] = {0};
-		m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.UAVs, UAVs, 0, D3D11_1_UAV_SLOT_COUNT);
-	
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.UAVStartSlot, NumViews);
+    for(UINT i = 0; i < NumViews; i++)
+      RTs[i] = UNWRAP(WrappedID3D11RenderTargetView1, RTs[i]);
 
-		for(UINT i=0; i < NumViews; i++)
-			RenderTargetViews[i] = UNWRAP(WrappedID3D11RenderTargetView, RenderTargetViews[i]);
+    if(IsLoading(m_State))
+      RecordOutputMergerStats(NumViews, RTs, pDepthStencilView, 0, 0, NULL);
 
-		m_pRealContext->OMSetRenderTargets(NumViews, RenderTargetViews,
-												UNWRAP(WrappedID3D11DepthStencilView, pDepthStencilView));
-		VerifyState();
-	}
-	
-	SAFE_DELETE_ARRAY(RenderTargetViews);
+    m_pRealContext->OMSetRenderTargets(NumViews, RTs,
+                                       UNWRAP(WrappedID3D11DepthStencilView, pDepthStencilView));
+    VerifyState();
+  }
 
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::OMSetRenderTargets(UINT NumViews, ID3D11RenderTargetView *const *ppRenderTargetViews, ID3D11DepthStencilView *pDepthStencilView)
+void WrappedID3D11DeviceContext::OMSetRenderTargets(UINT NumViews,
+                                                    ID3D11RenderTargetView *const *ppRenderTargetViews,
+                                                    ID3D11DepthStencilView *pDepthStencilView)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_SMALL_CONTEXT(SET_RTARGET);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_OMSetRenderTargets(NumViews, ppRenderTargetViews, pDepthStencilView);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	ID3D11RenderTargetView *RTs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
-	for(UINT i=0; i < NumViews && ppRenderTargetViews; i++)
-		RTs[i] = ppRenderTargetViews[i];
+  m_EmptyCommandList = false;
 
-	// this function always sets all render targets
-	if(m_CurrentPipelineState->ValidOutputMerger(RTs, pDepthStencilView))
-	{
-		m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.RenderTargets, RTs, 0, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT);
-		m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.DepthView, pDepthStencilView);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.UAVStartSlot, NumViews);
-	}
-	else if(m_State >= WRITING)
-	{
-		// make sure to mark resources referenced if the OM state is invalid, so they aren't eliminated from the
-		// log (which might make this combination valid on replay without some of the targets!)
-		for(UINT i=0; i < NumViews; i++)
-		{
-			if(ppRenderTargetViews && ppRenderTargetViews[i])
-			{
-				ID3D11Resource *res = NULL;
-				ppRenderTargetViews[i]->GetResource(&res);
-				MarkResourceReferenced(GetIDForResource(ppRenderTargetViews[i]), eFrameRef_Read);
-				MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
-				SAFE_RELEASE(res);
-			}
-		}
+  ID3D11RenderTargetView *RTs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
+  for(UINT i = 0; i < NumViews && ppRenderTargetViews; i++)
+    RTs[i] = UNWRAP(WrappedID3D11RenderTargetView1, ppRenderTargetViews[i]);
 
-		if(pDepthStencilView)
-		{
-			ID3D11Resource *res = NULL;
-			pDepthStencilView->GetResource(&res);
-			MarkResourceReferenced(GetIDForResource(pDepthStencilView), eFrameRef_Read);
-			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
-			SAFE_RELEASE(res);
-		}
-	}
+  SERIALISE_TIME_CALL(m_pRealContext->OMSetRenderTargets(
+      NumViews, RTs, UNWRAP(WrappedID3D11DepthStencilView, pDepthStencilView)));
 
-	ID3D11UnorderedAccessView *UAVs[D3D11_1_UAV_SLOT_COUNT] = {0};
-	m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.UAVs, UAVs, 0, D3D11_1_UAV_SLOT_COUNT);
-	
-	for(UINT i=0; i < NumViews; i++)
-	{
-		if(ppRenderTargetViews && ppRenderTargetViews[i])
-		{
-			if(m_State >= WRITING)
-			{
-				ID3D11Resource *res = NULL;
-				ppRenderTargetViews[i]->GetResource(&res);
-				// technically this isn't dirty until the draw call, but let's be conservative
-				// to avoid having to track "possibly" dirty resources.
-				// Besides, it's unlikely an application will set an output then not draw to it
-				if(m_State == WRITING_IDLE)
-					m_pDevice->GetResourceManager()->MarkDirtyResource(GetIDForResource(res));
-				SAFE_RELEASE(res);
-			}
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::OMSetRenderTargets);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_OMSetRenderTargets(GET_SERIALISER, NumViews, ppRenderTargetViews, pDepthStencilView);
 
-			RTs[i] = UNWRAP(WrappedID3D11RenderTargetView, ppRenderTargetViews[i]);
-		}
-	}
+    m_ContextRecord->AddChunk(scope.Get());
+  }
 
-	if(pDepthStencilView && m_State >= WRITING)
-	{
-		ID3D11Resource *res = NULL;
-		pDepthStencilView->GetResource(&res);
+  for(UINT i = 0; i < NumViews && ppRenderTargetViews; i++)
+    RTs[i] = ppRenderTargetViews[i];
 
-		if(m_State == WRITING_IDLE)
-			m_pDevice->GetResourceManager()->MarkDirtyResource(GetIDForResource(res));
-		SAFE_RELEASE(res);
-	}
+  // this function always sets all render targets
+  if(m_CurrentPipelineState->ValidOutputMerger(RTs, NumViews, pDepthStencilView, NULL, 0))
+  {
+    m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.RenderTargets, RTs, 0,
+                                           D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT);
+    m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.DepthView, pDepthStencilView);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.UAVStartSlot, NumViews);
+  }
 
-	m_pRealContext->OMSetRenderTargets(NumViews, RTs, UNWRAP(WrappedID3D11DepthStencilView, pDepthStencilView));
-	VerifyState();
+  ID3D11UnorderedAccessView *UAVs[D3D11_1_UAV_SLOT_COUNT] = {0};
+  m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.UAVs, UAVs, 0,
+                                         D3D11_1_UAV_SLOT_COUNT);
+
+  for(UINT i = 0; i < NumViews; i++)
+  {
+    if(ppRenderTargetViews && ppRenderTargetViews[i])
+    {
+      if(IsCaptureMode(m_State))
+      {
+        // technically this isn't dirty until the draw call, but let's be conservative
+        // to avoid having to track "possibly" dirty resources.
+        // Besides, it's unlikely an application will set an output then not draw to it
+        MarkDirtyResource(GetViewResourceResID(ppRenderTargetViews[i]));
+      }
+
+      RTs[i] = UNWRAP(WrappedID3D11RenderTargetView1, ppRenderTargetViews[i]);
+    }
+  }
+
+  if(pDepthStencilView && IsCaptureMode(m_State))
+  {
+    MarkDirtyResource(GetViewResourceResID(pDepthStencilView));
+  }
+
+  if(IsActiveCapturing(m_State))
+  {
+    // make sure to mark resources referenced even if the OM state is invalid, so they aren't
+    // eliminated from the capture (which might make this combination valid on replay without some
+    // of the targets!)
+    for(UINT i = 0; i < NumViews; i++)
+    {
+      if(ppRenderTargetViews && ppRenderTargetViews[i])
+      {
+        MarkResourceReferenced(GetIDForDeviceChild(ppRenderTargetViews[i]), eFrameRef_Read);
+        MarkResourceReferenced(GetViewResourceResID(ppRenderTargetViews[i]), eFrameRef_PartialWrite);
+      }
+    }
+
+    if(pDepthStencilView)
+    {
+      MarkResourceReferenced(GetIDForDeviceChild(pDepthStencilView), eFrameRef_Read);
+      MarkResourceReferenced(GetViewResourceResID(pDepthStencilView), eFrameRef_PartialWrite);
+    }
+  }
+
+  VerifyState();
 }
 
+// some helper enums with custom stringise to handle special cases
+enum D3D11RTVCount
+{
+};
+
+DECLARE_REFLECTION_ENUM(D3D11RTVCount);
+
+template <>
+rdcstr DoStringise(const D3D11RTVCount &el)
+{
+  RDCCOMPILE_ASSERT(sizeof(D3D11RTVCount) == sizeof(uint32_t), "Enum isn't uint sized");
+
+  if(el == D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL)
+    return "D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL";
+
+  return ToStr(uint32_t(el));
+}
+
+enum D3D11UAVCount
+{
+};
+
+DECLARE_REFLECTION_ENUM(D3D11UAVCount);
+
+template <>
+rdcstr DoStringise(const D3D11UAVCount &el)
+{
+  RDCCOMPILE_ASSERT(sizeof(D3D11UAVCount) == sizeof(uint32_t), "Enum isn't uint sized");
+
+  if(el == D3D11_KEEP_UNORDERED_ACCESS_VIEWS)
+    return "D3D11_KEEP_UNORDERED_ACCESS_VIEWS";
+
+  return ToStr(uint32_t(el));
+}
+
+template <typename SerialiserType>
 bool WrappedID3D11DeviceContext::Serialise_OMSetRenderTargetsAndUnorderedAccessViews(
-												UINT NumRTVs_, ID3D11RenderTargetView *const *ppRenderTargetViews,
-												ID3D11DepthStencilView *pDepthStencilView,
-												UINT UAVStartSlot_, UINT NumUAVs_, ID3D11UnorderedAccessView *const *ppUnorderedAccessViews,
-												const UINT *pUAVInitialCounts)
+    SerialiserType &ser, UINT NumRTVs, ID3D11RenderTargetView *const *ppRenderTargetViews,
+    ID3D11DepthStencilView *pDepthStencilView, UINT UAVStartSlot, UINT NumUAVs,
+    ID3D11UnorderedAccessView *const *ppUnorderedAccessViews, const UINT *pUAVInitialCounts)
 {
-	SERIALISE_ELEMENT(ResourceId, DepthStencilView, GetIDForResource(pDepthStencilView));
+  // cast to a special enum so we print the two 'keep' constants nicely
+  SERIALISE_ELEMENT_TYPED(D3D11RTVCount, NumRTVs);
 
-	SERIALISE_ELEMENT(uint32_t, NumRTVs, NumRTVs_);
+  // handle special values for counts
+  const bool KeepRTVs = (NumRTVs == D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL);
+  const bool ModifyRTVs = !KeepRTVs;
+  if(!ModifyRTVs)
+    NumRTVs = 0;
 
-	SERIALISE_ELEMENT(uint32_t, UAVStartSlot, UAVStartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumUAVs, NumUAVs_);
+  SERIALISE_ELEMENT_ARRAY(ppRenderTargetViews, NumRTVs);
 
-	ID3D11RenderTargetView **RenderTargetViews = NULL;
-	ID3D11UnorderedAccessView **UnorderedAccessViews = NULL;
+  SERIALISE_ELEMENT(pDepthStencilView);
+  SERIALISE_ELEMENT(UAVStartSlot);
 
-	if(NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL)
-	{
-		RenderTargetViews = new ID3D11RenderTargetView *[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
-		for(UINT i=0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
-			RenderTargetViews[i] = NULL;
-	} 
+  SERIALISE_ELEMENT_TYPED(D3D11UAVCount, NumUAVs);
 
-	if(NumUAVs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS)
-	{
-		UnorderedAccessViews = new ID3D11UnorderedAccessView *[D3D11_1_UAV_SLOT_COUNT];
-		for(UINT i=0; i < D3D11_1_UAV_SLOT_COUNT; i++)
-			UnorderedAccessViews[i] = NULL;
-	}
+  const bool KeepUAVs = (NumUAVs == D3D11_KEEP_UNORDERED_ACCESS_VIEWS);
+  const bool ModifyUAVs = !KeepUAVs;
+  if(!ModifyUAVs)
+    NumUAVs = 0;
 
-	SERIALISE_ELEMENT(uint8_t, HasInitialCounts, pUAVInitialCounts != NULL);
+  SERIALISE_ELEMENT_ARRAY(ppUnorderedAccessViews, NumUAVs);
+  SERIALISE_ELEMENT_ARRAY(pUAVInitialCounts, NumUAVs);
 
-	SERIALISE_ELEMENT_ARR_OPT(uint32_t, UAVInitialCounts, pUAVInitialCounts, NumUAVs, HasInitialCounts && NumUAVs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS);
+  RDCASSERT(ModifyRTVs || ModifyUAVs);
 
-	RDCASSERT(NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL || NumUAVs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS);
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumRTVs && NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppRenderTargetViews[i]));
+  if(IsReplayingAndReading())
+  {
+    // any bind of RTVs or UAVs implicitly NULLs out the remaining slots, so we don't want to just
+    // change the bindings we were passed, we want to always change ALL bindings, and just set the
+    // subset that we were passed
+    ID3D11RenderTargetView *RTs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
+    ID3D11UnorderedAccessView *UAVs[D3D11_1_UAV_SLOT_COUNT] = {0};
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			RenderTargetViews[i] = (ID3D11RenderTargetView *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-	}
+    for(UINT i = 0; i < NumRTVs && ModifyRTVs; i++)
+      RTs[i] = ppRenderTargetViews[i];
 
-	for(UINT i=0; i < NumUAVs && NumUAVs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppUnorderedAccessViews[i]));
+    for(UINT i = 0; i < NumUAVs && ModifyUAVs; i++)
+      UAVs[i] = ppUnorderedAccessViews[i];
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			UnorderedAccessViews[i] = (ID3D11UnorderedAccessView *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-	}
+    if(ModifyRTVs)
+    {
+      ID3D11UnorderedAccessView *const *srcUAVs = ppUnorderedAccessViews;
+      UINT srcUAVcount = NumUAVs;
 
-	if(m_State <= EXECUTING)
-	{	
-		pDepthStencilView = NULL;
-		if(m_pDevice->GetResourceManager()->HasLiveResource(DepthStencilView))
-			pDepthStencilView = (ID3D11DepthStencilView *)m_pDevice->GetResourceManager()->GetLiveResource(DepthStencilView);
+      if(!ModifyUAVs)
+      {
+        srcUAVs = m_CurrentPipelineState->OM.UAVs;
+        srcUAVcount = D3D11_1_UAV_SLOT_COUNT;
 
-		if(NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL)
-		{
-			if(m_CurrentPipelineState->ValidOutputMerger(RenderTargetViews, pDepthStencilView))
-			{
-				m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.RenderTargets, RenderTargetViews, 0, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT);
-				m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.DepthView, pDepthStencilView);
-			}
-		}
+        // if we're not modifying the UAVs but NumRTVs > oldUAVStartSlot then we unbind any
+        // overlapped UAVs.
+        if(NumRTVs > m_CurrentPipelineState->OM.UAVStartSlot)
+        {
+          UINT diff = NumRTVs - m_CurrentPipelineState->OM.UAVStartSlot;
+          srcUAVcount -= diff;
+          srcUAVs += diff;
+        }
+      }
 
-		if(NumUAVs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS)
-		{
-			m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.UAVs, UnorderedAccessViews, 0, D3D11_1_UAV_SLOT_COUNT);
-			m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.UAVStartSlot, UAVStartSlot);
-		}
+      if(m_CurrentPipelineState->ValidOutputMerger(ppRenderTargetViews, NumRTVs, pDepthStencilView,
+                                                   srcUAVs, srcUAVcount))
+      {
+        m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.RenderTargets, RTs, 0,
+                                               D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT);
+        m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.DepthView,
+                                               pDepthStencilView);
 
-		for(UINT i=0; i < NumRTVs && NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL; i++)
-			RenderTargetViews[i] = UNWRAP(WrappedID3D11RenderTargetView, RenderTargetViews[i]);
+        if(!ModifyUAVs)
+        {
+          // set UAVStartSlot to NumRTVs
+          m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.UAVStartSlot, NumRTVs);
 
-		for(UINT i=0; i < NumUAVs && NumUAVs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS; i++)
-			UnorderedAccessViews[i] = UNWRAP(WrappedID3D11UnorderedAccessView, UnorderedAccessViews[i]);
+          if(NumRTVs > m_CurrentPipelineState->OM.UAVStartSlot)
+          {
+            UINT diff = NumRTVs - m_CurrentPipelineState->OM.UAVStartSlot;
 
-		if(NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL)
-			pDepthStencilView = UNWRAP(WrappedID3D11DepthStencilView, pDepthStencilView);
-		else
-			pDepthStencilView = NULL;
+            // release and unbind any UAVs that were unbound
+            for(UINT i = 0; i < diff; i++)
+              m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.UAVs[i],
+                                                     (ID3D11UnorderedAccessView *)NULL);
 
-		m_pRealContext->OMSetRenderTargetsAndUnorderedAccessViews(NumRTVs, RenderTargetViews,
-												pDepthStencilView,
-												UAVStartSlot, NumUAVs, UnorderedAccessViews, UAVInitialCounts);
-		VerifyState();
-	}
-	
-	SAFE_DELETE_ARRAY(RenderTargetViews);
-	SAFE_DELETE_ARRAY(UnorderedAccessViews);
-	SAFE_DELETE_ARRAY(UAVInitialCounts);
+            // move the array down *without* changing any refs
 
-	return true;
+            for(UINT i = 0; i < D3D11_1_UAV_SLOT_COUNT; i++)
+            {
+              if(i < D3D11_1_UAV_SLOT_COUNT - diff)
+              {
+                m_CurrentPipelineState->OM.UAVs[i] = m_CurrentPipelineState->OM.UAVs[i + diff];
+              }
+              else
+              {
+                // NULL without ref'ing, since we just moved this down lower in the array
+                m_CurrentPipelineState->OM.UAVs[i] = NULL;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if(ModifyUAVs)
+    {
+      bool valid = false;
+      if(ModifyRTVs)
+      {
+        valid = m_CurrentPipelineState->ValidOutputMerger(
+            ppRenderTargetViews, NumRTVs, pDepthStencilView, ppUnorderedAccessViews, NumUAVs);
+      }
+      else
+      {
+        // if we're not modifying RTVs, any that are < UAVStartSlot get unbound so don't consider
+        // for validity
+        valid = m_CurrentPipelineState->ValidOutputMerger(
+            m_CurrentPipelineState->OM.RenderTargets,
+            RDCMIN((UINT)D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, UAVStartSlot),
+            m_CurrentPipelineState->OM.DepthView, ppUnorderedAccessViews, NumUAVs);
+      }
+
+      if(valid)
+      {
+        m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.UAVs, UAVs, 0,
+                                               D3D11_1_UAV_SLOT_COUNT);
+        m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.UAVStartSlot, UAVStartSlot);
+
+        // unbind any conflicting RTVS
+        for(UINT i = UAVStartSlot; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
+          m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.RenderTargets[i],
+                                                 (ID3D11RenderTargetView *)NULL);
+      }
+    }
+
+    for(UINT i = 0; i < NumRTVs && ModifyRTVs; i++)
+      RTs[i] = UNWRAP(WrappedID3D11RenderTargetView1, RTs[i]);
+
+    for(UINT i = 0; i < NumUAVs && ModifyUAVs; i++)
+      UAVs[i] = UNWRAP(WrappedID3D11UnorderedAccessView1, UAVs[i]);
+
+    if(ModifyRTVs)
+      pDepthStencilView = UNWRAP(WrappedID3D11DepthStencilView, pDepthStencilView);
+    else
+      pDepthStencilView = NULL;
+
+    if(IsLoading(m_State))
+      RecordOutputMergerStats(NumRTVs, RTs, pDepthStencilView, UAVStartSlot, NumUAVs, UAVs);
+
+    m_pRealContext->OMSetRenderTargetsAndUnorderedAccessViews(
+        ModifyRTVs ? NumRTVs : D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL, RTs, pDepthStencilView,
+        UAVStartSlot, ModifyUAVs ? NumUAVs : D3D11_KEEP_UNORDERED_ACCESS_VIEWS, UAVs,
+        pUAVInitialCounts);
+    VerifyState();
+  }
+
+  return true;
 }
 
-void WrappedID3D11DeviceContext::OMSetRenderTargetsAndUnorderedAccessViews(UINT NumRTVs, ID3D11RenderTargetView *const *ppRenderTargetViews,
-												ID3D11DepthStencilView *pDepthStencilView,
-												UINT UAVStartSlot, UINT NumUAVs, ID3D11UnorderedAccessView *const *ppUnorderedAccessViews,
-												const UINT *pUAVInitialCounts)
+void WrappedID3D11DeviceContext::OMSetRenderTargetsAndUnorderedAccessViews(
+    UINT NumRTVs, ID3D11RenderTargetView *const *ppRenderTargetViews,
+    ID3D11DepthStencilView *pDepthStencilView, UINT UAVStartSlot, UINT NumUAVs,
+    ID3D11UnorderedAccessView *const *ppUnorderedAccessViews, const UINT *pUAVInitialCounts)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
-	
-	UINT StartSlot = UAVStartSlot;
+  DrainAnnotationQueue();
 
-	// D3D11 doesn't seem to complain about this case, but it messes our render state tracking so
-	// ensure we don't blat over any RTs with 'empty' UAVs.
-	if(NumUAVs == 0)
-		UAVStartSlot = RDCMAX(NumRTVs, UAVStartSlot);
+  m_EmptyCommandList = false;
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_RTARGET_AND_UAVS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_OMSetRenderTargetsAndUnorderedAccessViews(NumRTVs, ppRenderTargetViews, pDepthStencilView, UAVStartSlot, NumUAVs, ppUnorderedAccessViews, pUAVInitialCounts);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
+  UINT StartSlot = UAVStartSlot;
 
-	ID3D11RenderTargetView *RTs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
-	ID3D11UnorderedAccessView *UAVs[D3D11_1_UAV_SLOT_COUNT] = {0};
-	
-	for(UINT i=0; ppRenderTargetViews && i < NumRTVs; i++)
-		RTs[i] = ppRenderTargetViews[i];
-	
-	for(UINT i=0; ppUnorderedAccessViews && i < NumUAVs; i++)
-		UAVs[i] = ppUnorderedAccessViews[i];
+  // D3D11 doesn't seem to complain about this case, but it messes our render state tracking so
+  // ensure we don't blat over any RTs with 'empty' UAVs.
+  if(NumUAVs == 0)
+  {
+    if(NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL)
+      UAVStartSlot = RDCMAX(NumRTVs, UAVStartSlot);
+    else
+      UAVStartSlot = RDCMAX(m_CurrentPipelineState->OM.UAVStartSlot, UAVStartSlot);
+  }
 
-	if(NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL)
-	{
-		if(m_CurrentPipelineState->ValidOutputMerger(RTs, pDepthStencilView))
-		{
-			m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.RenderTargets, RTs, 0, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT);
-			m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.DepthView, pDepthStencilView);
-		}
-		else if(m_State >= WRITING)
-		{
-			// make sure to mark resources referenced if the OM state is invalid, so they aren't eliminated from the
-			// log (which might make this combination valid on replay without some of the targets!)
-			for(UINT i=0; i < NumRTVs; i++)
-			{
-				if(ppRenderTargetViews && ppRenderTargetViews[i])
-				{
-					ID3D11Resource *res = NULL;
-					ppRenderTargetViews[i]->GetResource(&res);
-					MarkResourceReferenced(GetIDForResource(ppRenderTargetViews[i]), eFrameRef_Read);
-					MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
-					SAFE_RELEASE(res);
-				}
-			}
+  ID3D11RenderTargetView *RTs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
+  ID3D11UnorderedAccessView *UAVs[D3D11_1_UAV_SLOT_COUNT] = {0};
 
-			if(pDepthStencilView)
-			{
-				ID3D11Resource *res = NULL;
-				pDepthStencilView->GetResource(&res);
-				MarkResourceReferenced(GetIDForResource(pDepthStencilView), eFrameRef_Read);
-				MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
-				SAFE_RELEASE(res);
-			}
-		}
-	}
+  for(UINT i = 0;
+      ppRenderTargetViews && NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL && i < NumRTVs;
+      i++)
+    RTs[i] = UNWRAP(WrappedID3D11RenderTargetView1, ppRenderTargetViews[i]);
 
-	if(NumUAVs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS)
-	{
-		m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.UAVs, UAVs, 0, D3D11_1_UAV_SLOT_COUNT);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.UAVStartSlot, UAVStartSlot);
-	}
-	
-	// invalid case where UAV/RTV overlap, UAV seems to take precedence
-	bool UAVOverlap = (NumUAVs > 0 && NumUAVs <= D3D11_1_UAV_SLOT_COUNT &&
-								     NumRTVs > 0 && NumRTVs <= D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT &&
-										 StartSlot < NumRTVs);
+  for(UINT i = 0;
+      ppUnorderedAccessViews && NumUAVs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS && i < NumUAVs; i++)
+    UAVs[i] = UNWRAP(WrappedID3D11UnorderedAccessView1, ppUnorderedAccessViews[i]);
 
-	if(UAVOverlap)
-	{
-		ID3D11RenderTargetView *NullRTs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
+  SERIALISE_TIME_CALL(m_pRealContext->OMSetRenderTargetsAndUnorderedAccessViews(
+      NumRTVs, ppRenderTargetViews ? RTs : NULL,
+      UNWRAP(WrappedID3D11DepthStencilView, pDepthStencilView), UAVStartSlot, NumUAVs,
+      ppUnorderedAccessViews ? UAVs : NULL, pUAVInitialCounts));
 
-		// unset any RTs overlapping with the UAV range
-		m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.RenderTargets, NullRTs, StartSlot,
-						RDCMIN(NumUAVs, D3D11_1_UAV_SLOT_COUNT - StartSlot));
-	}
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::OMSetRenderTargetsAndUnorderedAccessViews);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_OMSetRenderTargetsAndUnorderedAccessViews(GET_SERIALISER, NumRTVs, ppRenderTargetViews,
+                                                        pDepthStencilView, UAVStartSlot, NumUAVs,
+                                                        ppUnorderedAccessViews, pUAVInitialCounts);
 
-	for(UINT i=0; ppRenderTargetViews && i < NumRTVs; i++)
-	{
-		if(ppRenderTargetViews[i] && m_State >= WRITING)
-		{
-			ID3D11Resource *res = NULL;
-			ppRenderTargetViews[i]->GetResource(&res);
-			// technically this isn't dirty until the draw call, but let's be conservative
-			// to avoid having to track "possibly" dirty resources.
-			// Besides, it's unlikely an application will set an output then not draw to it
-			if(m_State == WRITING_IDLE)
-				m_pDevice->GetResourceManager()->MarkDirtyResource(GetIDForResource(res));
-			SAFE_RELEASE(res);
-		}
+    m_ContextRecord->AddChunk(scope.Get());
+  }
 
-		RTs[i] = UNWRAP(WrappedID3D11RenderTargetView, ppRenderTargetViews[i]);
-	}
-	
-	for(UINT i=0; ppUnorderedAccessViews && i < NumUAVs; i++)
-	{
-		if(ppUnorderedAccessViews[i] && m_State >= WRITING)
-		{
-			ID3D11Resource *res = NULL;
-			ppUnorderedAccessViews[i]->GetResource(&res);
-			if(m_State == WRITING_IDLE)
-				m_pDevice->GetResourceManager()->MarkDirtyResource(GetIDForResource(res));
-			SAFE_RELEASE(res);
-		}
+  for(UINT i = 0;
+      ppRenderTargetViews && NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL && i < NumRTVs;
+      i++)
+    RTs[i] = ppRenderTargetViews[i];
 
-		UAVs[i] = UNWRAP(WrappedID3D11UnorderedAccessView, ppUnorderedAccessViews[i]);
-	}
+  for(UINT i = 0;
+      ppUnorderedAccessViews && NumUAVs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS && i < NumUAVs; i++)
+    UAVs[i] = ppUnorderedAccessViews[i];
 
-	if(pDepthStencilView && m_State >= WRITING)
-	{
-		ID3D11Resource *res = NULL;
-		pDepthStencilView->GetResource(&res);
+  const bool ModifyRTVs = NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL;
+  const bool ModifyUAVs = NumUAVs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS;
 
-		if(m_State == WRITING_IDLE)
-			m_pDevice->GetResourceManager()->MarkDirtyResource(GetIDForResource(res));
-		SAFE_RELEASE(res);
-	}
+  if(ModifyRTVs)
+  {
+    ID3D11UnorderedAccessView **srcUAVs = ModifyUAVs ? UAVs : m_CurrentPipelineState->OM.UAVs;
+    UINT srcUAVcount = ModifyUAVs ? NumUAVs : D3D11_1_UAV_SLOT_COUNT;
 
-	m_pRealContext->OMSetRenderTargetsAndUnorderedAccessViews(NumRTVs, ppRenderTargetViews ? RTs : NULL, UNWRAP(WrappedID3D11DepthStencilView, pDepthStencilView),
-																	UAVStartSlot, NumUAVs, ppUnorderedAccessViews ? UAVs : NULL, pUAVInitialCounts);
-	VerifyState();
+    if(m_CurrentPipelineState->ValidOutputMerger(ppRenderTargetViews, NumRTVs, pDepthStencilView,
+                                                 srcUAVs, srcUAVcount))
+    {
+      m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.RenderTargets, RTs, 0,
+                                             D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT);
+      m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.DepthView, pDepthStencilView);
+    }
+
+    if(IsActiveCapturing(m_State))
+    {
+      // make sure to mark resources referenced if the OM state is invalid, so they aren't
+      // eliminated from the
+      // log (which might make this combination valid on replay without some of the targets!)
+      for(UINT i = 0; i < NumRTVs; i++)
+      {
+        if(ppRenderTargetViews && ppRenderTargetViews[i])
+        {
+          MarkResourceReferenced(GetIDForDeviceChild(ppRenderTargetViews[i]), eFrameRef_Read);
+          MarkResourceReferenced(GetViewResourceResID(ppRenderTargetViews[i]), eFrameRef_Read);
+        }
+      }
+
+      if(pDepthStencilView)
+      {
+        MarkResourceReferenced(GetIDForDeviceChild(pDepthStencilView), eFrameRef_Read);
+        MarkResourceReferenced(GetViewResourceResID(pDepthStencilView), eFrameRef_Read);
+      }
+    }
+  }
+
+  if(ModifyUAVs)
+  {
+    bool valid = false;
+    if(ModifyRTVs)
+      valid =
+          m_CurrentPipelineState->ValidOutputMerger(RTs, NumRTVs, pDepthStencilView, UAVs, NumUAVs);
+    else
+      valid = m_CurrentPipelineState->ValidOutputMerger(
+          m_CurrentPipelineState->OM.RenderTargets,
+          RDCMIN((UINT)D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, UAVStartSlot),
+          m_CurrentPipelineState->OM.DepthView, UAVs, NumUAVs);
+
+    if(valid)
+    {
+      m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.UAVs, UAVs, 0,
+                                             D3D11_1_UAV_SLOT_COUNT);
+      m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.UAVStartSlot, UAVStartSlot);
+    }
+
+    if(IsActiveCapturing(m_State))
+    {
+      // make sure to mark resources referenced if the OM state is invalid, so they aren't
+      // eliminated from the
+      // log (which might make this combination valid on replay without some of the targets!)
+      for(UINT i = 0; i < NumUAVs; i++)
+      {
+        if(UAVs[i])
+        {
+          MarkResourceReferenced(GetIDForDeviceChild(UAVs[i]), eFrameRef_Read);
+          MarkResourceReferenced(GetViewResourceResID(UAVs[i]), eFrameRef_Read);
+        }
+      }
+    }
+  }
+
+  // invalid case where UAV/RTV overlap, UAV seems to take precedence
+  bool UAVOverlap = (NumUAVs > 0 && NumUAVs <= D3D11_1_UAV_SLOT_COUNT && NumRTVs > 0 &&
+                     NumRTVs <= D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT && StartSlot < NumRTVs);
+
+  if(UAVOverlap)
+  {
+    ID3D11RenderTargetView *NullRTs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
+
+    // unset any RTs overlapping with the UAV range
+    m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.RenderTargets, NullRTs,
+                                           StartSlot,
+                                           RDCMIN(NumUAVs, D3D11_1_UAV_SLOT_COUNT - StartSlot));
+  }
+
+  for(UINT i = 0;
+      ppRenderTargetViews && NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL && i < NumRTVs;
+      i++)
+  {
+    if(ppRenderTargetViews[i] && IsCaptureMode(m_State))
+    {
+      // technically this isn't dirty until the draw call, but let's be conservative
+      // to avoid having to track "possibly" dirty resources.
+      // Besides, it's unlikely an application will set an output then not draw to it
+      MarkDirtyResource(GetViewResourceResID(ppRenderTargetViews[i]));
+    }
+
+    RTs[i] = UNWRAP(WrappedID3D11RenderTargetView1, ppRenderTargetViews[i]);
+  }
+
+  for(UINT i = 0;
+      ppUnorderedAccessViews && NumUAVs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS && i < NumUAVs; i++)
+  {
+    if(ppUnorderedAccessViews[i] && IsCaptureMode(m_State))
+    {
+      MarkDirtyResource(GetViewResourceResID(ppUnorderedAccessViews[i]));
+    }
+
+    UAVs[i] = UNWRAP(WrappedID3D11UnorderedAccessView1, ppUnorderedAccessViews[i]);
+  }
+
+  if(pDepthStencilView && IsCaptureMode(m_State))
+  {
+    MarkDirtyResource(GetViewResourceResID(pDepthStencilView));
+  }
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_OMSetBlendState(ID3D11BlendState *pBlendState, const FLOAT BlendFactor_[4], UINT SampleMask_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_OMSetBlendState(SerialiserType &ser,
+                                                           ID3D11BlendState *pBlendState,
+                                                           const FLOAT BlendFactor[4],
+                                                           UINT SampleMask)
 {
-	SERIALISE_ELEMENT(ResourceId, State, GetIDForResource(pBlendState));
-	
-	float BlendFactor[4] = {0};
+  SERIALISE_ELEMENT(pBlendState);
+  SERIALISE_ELEMENT_ARRAY(BlendFactor, 4);
+  SERIALISE_ELEMENT(SampleMask);
 
-	if(m_State >= WRITING)
-	{
-		if((const FLOAT *)BlendFactor_ == NULL)
-		{
-			BlendFactor[0] = BlendFactor[1] = BlendFactor[2] = BlendFactor[3] = 1.0f;
-		}
-		else
-		{
-			memcpy(BlendFactor, BlendFactor_, sizeof(float)*4);
-		}
-	}
+  SERIALISE_CHECK_READ_ERRORS();
 
-	m_pSerialiser->SerialisePODArray<4>("BlendFactor", BlendFactor);
+  if(IsReplayingAndReading())
+  {
+    FLOAT DefaultBlendFactor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    const FLOAT *SafeBlendFactor = BlendFactor ? BlendFactor : DefaultBlendFactor;
 
-	SERIALISE_ELEMENT(uint32_t, SampleMask, SampleMask_);
+    if(IsLoading(m_State))
+      RecordBlendStats(pBlendState, SafeBlendFactor, SampleMask);
 
-	if(m_State <= EXECUTING)
-	{
-		ID3D11DeviceChild *live = NULL;
-		if(m_pDevice->GetResourceManager()->HasLiveResource(State))
-			live = m_pDevice->GetResourceManager()->GetLiveResource(State);
+    {
+      m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->OM.BlendState, pBlendState);
+      m_pRealContext->OMSetBlendState(UNWRAP(WrappedID3D11BlendState1, pBlendState), BlendFactor,
+                                      SampleMask);
+    }
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.BlendFactor, SafeBlendFactor, 0, 4);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.SampleMask, SampleMask);
+    VerifyState();
+  }
 
-		if(WrappedID3D11BlendState1::IsAlloc(live))
-		{
-			ID3D11BlendState1 *state = (ID3D11BlendState1 *)live;
-			m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->OM.BlendState, (ID3D11BlendState *)state);
-			m_pRealContext->OMSetBlendState((ID3D11BlendState *)UNWRAP(WrappedID3D11BlendState1, state), BlendFactor, SampleMask);
-		}
-		else
-		{
-			ID3D11BlendState *state = (ID3D11BlendState *)live;
-			m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->OM.BlendState, state);
-			m_pRealContext->OMSetBlendState(UNWRAP(WrappedID3D11BlendState, state), BlendFactor, SampleMask);
-		}
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.BlendFactor, BlendFactor, 0, 4);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.SampleMask, SampleMask);
-		VerifyState();
-	}
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::OMSetBlendState(ID3D11BlendState *pBlendState, const FLOAT BlendFactor[4], UINT SampleMask)
+void WrappedID3D11DeviceContext::OMSetBlendState(ID3D11BlendState *pBlendState,
+                                                 const FLOAT BlendFactor[4], UINT SampleMask)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_BLEND);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_OMSetBlendState(pBlendState, BlendFactor, SampleMask);
+  m_EmptyCommandList = false;
 
-		m_ContextRecord->AddChunk(scope.Get());
-	}
+  SERIALISE_TIME_CALL(m_pRealContext->OMSetBlendState(
+      (ID3D11BlendState *)UNWRAP(WrappedID3D11BlendState1, pBlendState), BlendFactor, SampleMask));
 
-	FLOAT DefaultBlendFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->OM.BlendState, pBlendState);
-	if(BlendFactor != NULL)
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.BlendFactor, BlendFactor, 0, 4);
-	else
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.BlendFactor, DefaultBlendFactor, 0, 4);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.SampleMask, SampleMask);
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::OMSetBlendState);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_OMSetBlendState(GET_SERIALISER, pBlendState, BlendFactor, SampleMask);
 
-	if(!pBlendState || WrappedID3D11BlendState::IsAlloc(pBlendState))
-		m_pRealContext->OMSetBlendState(UNWRAP(WrappedID3D11BlendState, pBlendState), BlendFactor, SampleMask);
-	else
-		m_pRealContext->OMSetBlendState((ID3D11BlendState *)UNWRAP(WrappedID3D11BlendState1, pBlendState), BlendFactor, SampleMask);
+    MarkResourceReferenced(GetIDForDeviceChild(pBlendState), eFrameRef_Read);
 
-	VerifyState();
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  FLOAT DefaultBlendFactor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->OM.BlendState, pBlendState);
+  if(BlendFactor != NULL)
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.BlendFactor, BlendFactor, 0, 4);
+  else
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.BlendFactor, DefaultBlendFactor, 0, 4);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.SampleMask, SampleMask);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_OMSetDepthStencilState(ID3D11DepthStencilState *pDepthStencilState, UINT StencilRef_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_OMSetDepthStencilState(
+    SerialiserType &ser, ID3D11DepthStencilState *pDepthStencilState, UINT StencilRef)
 {
-	SERIALISE_ELEMENT(ResourceId, State, GetIDForResource(pDepthStencilState));
-	SERIALISE_ELEMENT(uint32_t, StencilRef, StencilRef_&0xff);
+  SERIALISE_ELEMENT(pDepthStencilState);
+  SERIALISE_ELEMENT(StencilRef);
 
-	if(m_State <= EXECUTING)
-	{
-		pDepthStencilState = NULL;
-		if(m_pDevice->GetResourceManager()->HasLiveResource(State))
-			pDepthStencilState = (ID3D11DepthStencilState *)m_pDevice->GetResourceManager()->GetLiveResource(State);
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->OM.DepthStencilState, pDepthStencilState);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.StencRef, StencilRef&0xff);
-		m_pRealContext->OMSetDepthStencilState(UNWRAP(WrappedID3D11DepthStencilState, pDepthStencilState), StencilRef);
-		VerifyState();
-	}
+  SERIALISE_CHECK_READ_ERRORS();
 
-	return true;
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordDepthStencilStats(pDepthStencilState, StencilRef);
+
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->OM.DepthStencilState,
+                                          pDepthStencilState);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.StencRef, StencilRef & 0xff);
+    m_pRealContext->OMSetDepthStencilState(
+        UNWRAP(WrappedID3D11DepthStencilState, pDepthStencilState), StencilRef);
+    VerifyState();
+  }
+
+  return true;
 }
 
-void WrappedID3D11DeviceContext::OMSetDepthStencilState(ID3D11DepthStencilState *pDepthStencilState, UINT StencilRef)
+void WrappedID3D11DeviceContext::OMSetDepthStencilState(ID3D11DepthStencilState *pDepthStencilState,
+                                                        UINT StencilRef)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_DEPTHSTENCIL);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_OMSetDepthStencilState(pDepthStencilState, StencilRef);
+  m_EmptyCommandList = false;
 
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->OM.DepthStencilState, pDepthStencilState);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.StencRef, StencilRef&0xff);
-	m_pRealContext->OMSetDepthStencilState(UNWRAP(WrappedID3D11DepthStencilState, pDepthStencilState), StencilRef);
-	VerifyState();
+  SERIALISE_TIME_CALL(m_pRealContext->OMSetDepthStencilState(
+      UNWRAP(WrappedID3D11DepthStencilState, pDepthStencilState), StencilRef));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::OMSetDepthStencilState);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_OMSetDepthStencilState(GET_SERIALISER, pDepthStencilState, StencilRef);
+
+    MarkResourceReferenced(GetIDForDeviceChild(pDepthStencilState), eFrameRef_Read);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->OM.DepthStencilState,
+                                        pDepthStencilState);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.StencRef, StencilRef & 0xff);
+  VerifyState();
 }
 
 #pragma endregion Output Merger
 
 #pragma region Draw
 
-void WrappedID3D11DeviceContext::Serialise_DebugMessages()
+template <typename SerialiserType>
+void WrappedID3D11DeviceContext::Serialise_DebugMessages(SerialiserType &ser)
 {
-	SCOPED_SERIALISE_CONTEXT(DEBUG_MESSAGES);
-	
-	vector<DebugMessage> debugMessages;
+  rdcarray<DebugMessage> DebugMessages;
 
-	m_EmptyCommandList = false;
+  m_EmptyCommandList = false;
 
-	// only grab debug messages for the immediate context, without serialising all
-	// API use there's no way to find out which messages come from which context :(.
-	if(m_State == WRITING_CAPFRAME && GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE)
-	{
-		debugMessages = m_pDevice->GetDebugMessages();
-	}
+  // only grab debug messages for the immediate context, without serialising all
+  // API use there's no way to find out which messages come from which context :(.
+  if(ser.IsWriting() && IsActiveCapturing(m_State) && GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE)
+  {
+    DebugMessages = m_pDevice->GetDebugMessages();
+  }
 
-	SERIALISE_ELEMENT(bool, HasCallstack, RenderDoc::Inst().GetCaptureOptions().CaptureCallstacksOnlyDraws != 0);
+  SERIALISE_ELEMENT(DebugMessages);
 
-	if(HasCallstack)
-	{
-		if(m_State >= WRITING)
-		{
-			Callstack::Stackwalk *call = Callstack::Collect();
+  // if we're using replay-time API validation, fetch messages at replay time and ignore any
+  // serialised ones
+  if(ser.IsReading() && IsLoading(m_State) && m_pDevice->GetReplayOptions().apiValidation)
+  {
+    if(GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE)
+      DebugMessages = m_pDevice->GetDebugMessages();
+    else
+      DebugMessages.clear();
+  }
 
-			RDCASSERT(call->NumLevels() < 0xff);
+  // hide empty sets of messages.
+  if(ser.IsReading() && DebugMessages.empty())
+    ser.Hidden();
 
-			size_t numLevels = call->NumLevels();
-			uint64_t *stack = (uint64_t *)call->GetAddrs();
-
-			m_pSerialiser->SerialisePODArray("callstack", stack, numLevels);
-
-			delete call;
-		}
-		else
-		{
-			size_t numLevels = 0;
-			uint64_t *stack = NULL;
-
-			m_pSerialiser->SerialisePODArray("callstack", stack, numLevels);
-
-			m_pSerialiser->SetCallstack(stack, numLevels);
-
-			SAFE_DELETE_ARRAY(stack);
-		}
-	}
-
-	SERIALISE_ELEMENT(uint32_t, NumMessages, (uint32_t)debugMessages.size());
-
-	for(uint32_t i=0; i < NumMessages; i++)
-	{
-		ScopedContext msgscope(m_pSerialiser, "DebugMessage", "DebugMessage", 0, false);
-
-		string desc;
-		if(m_State >= WRITING)
-			desc = debugMessages[i].description.elems;
-
-		SERIALISE_ELEMENT(uint32_t, Category, debugMessages[i].category);
-		SERIALISE_ELEMENT(uint32_t, Severity, debugMessages[i].severity);
-		SERIALISE_ELEMENT(uint32_t, ID, debugMessages[i].messageID);
-		SERIALISE_ELEMENT(string, Description, desc);
-
-		if(m_State == READING)
-		{
-			DebugMessage msg;
-			msg.eventID = m_CurEventID;
-			msg.source = eDbgSource_API;
-			msg.category = (DebugMessageCategory)Category;
-			msg.severity = (DebugMessageSeverity)Severity;
-			msg.messageID = ID;
-			msg.description = Description;
-			
-			if(GetType() == D3D11_DEVICE_CONTEXT_DEFERRED)
-				msg.eventID = m_pDevice->GetImmediateContext()->GetEventID();
-
-			m_pDevice->AddDebugMessage(msg);
-		}
-	}
+  if(ser.IsReading() && IsLoading(m_State))
+  {
+    for(DebugMessage &msg : DebugMessages)
+    {
+      msg.eventId = m_CurEventID;
+      m_pDevice->AddDebugMessage(msg);
+    }
+  }
 }
 
-
-bool WrappedID3D11DeviceContext::Serialise_DrawIndexedInstanced(UINT IndexCountPerInstance_, UINT InstanceCount_, UINT StartIndexLocation_,
-																INT BaseVertexLocation_, UINT StartInstanceLocation_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_DrawIndexedInstanced(
+    SerialiserType &ser, UINT IndexCountPerInstance, UINT InstanceCount, UINT StartIndexLocation,
+    INT BaseVertexLocation, UINT StartInstanceLocation)
 {
-	SERIALISE_ELEMENT(uint32_t, IndexCountPerInstance, IndexCountPerInstance_);
-	SERIALISE_ELEMENT(uint32_t, InstanceCount, InstanceCount_);
-	SERIALISE_ELEMENT(uint32_t, StartIndexLocation, StartIndexLocation_);
-	SERIALISE_ELEMENT(int32_t, BaseVertexLocation, BaseVertexLocation_);
-	SERIALISE_ELEMENT(uint32_t, StartInstanceLocation, StartInstanceLocation_);
+  SERIALISE_ELEMENT(IndexCountPerInstance);
+  SERIALISE_ELEMENT(InstanceCount);
+  SERIALISE_ELEMENT(StartIndexLocation);
+  SERIALISE_ELEMENT(BaseVertexLocation);
+  SERIALISE_ELEMENT(StartInstanceLocation);
 
-	if(m_State <= EXECUTING)
-	{
-		m_pRealContext->DrawIndexedInstanced(IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation);
-	}
+  Serialise_DebugMessages(GET_SERIALISER);
 
-	const string desc = m_pSerialiser->GetDebugStr();
-	
-	Serialise_DebugMessages();
+  SERIALISE_CHECK_READ_ERRORS();
 
-	if(m_State == READING)
-	{
-		AddEvent(DRAW_INDEXED_INST, desc);
-		string name = "DrawIndexedInstanced(" + ToStr::Get(IndexCountPerInstance)
-						+ ", " + ToStr::Get(InstanceCount) + ")";
+  if(IsReplayingAndReading())
+  {
+    m_pRealContext->DrawIndexedInstanced(IndexCountPerInstance, InstanceCount, StartIndexLocation,
+                                         BaseVertexLocation, StartInstanceLocation);
 
-		FetchDrawcall draw;
-		draw.name = name;
-		draw.numIndices = IndexCountPerInstance;
-		draw.numInstances = InstanceCount;
-		draw.indexOffset = StartIndexLocation;
-		draw.vertexOffset = BaseVertexLocation;
-		draw.instanceOffset = StartInstanceLocation;
+    if(IsLoading(m_State))
+    {
+      RecordDrawStats(true, false, InstanceCount);
 
-		draw.flags |= eDraw_Drawcall|eDraw_Instanced|eDraw_UseIBuffer;
+      AddEvent();
 
-		AddDrawcall(draw, true);
-	}
+      DrawcallDescription draw;
+      draw.name =
+          StringFormat::Fmt("DrawIndexedInstanced(%u, %u)", IndexCountPerInstance, InstanceCount);
+      draw.numIndices = IndexCountPerInstance;
+      draw.numInstances = InstanceCount;
+      draw.indexOffset = StartIndexLocation;
+      draw.baseVertex = BaseVertexLocation;
+      draw.instanceOffset = StartInstanceLocation;
 
-	return true;
+      draw.flags |= DrawFlags::Drawcall | DrawFlags::Instanced | DrawFlags::Indexed;
+
+      AddDrawcall(draw, true);
+    }
+  }
+
+  return true;
 }
 
-void WrappedID3D11DeviceContext::DrawIndexedInstanced(UINT IndexCountPerInstance, UINT InstanceCount, UINT StartIndexLocation,
-												INT BaseVertexLocation, UINT StartInstanceLocation)
+void WrappedID3D11DeviceContext::DrawIndexedInstanced(UINT IndexCountPerInstance, UINT InstanceCount,
+                                                      UINT StartIndexLocation, INT BaseVertexLocation,
+                                                      UINT StartInstanceLocation)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	m_pRealContext->DrawIndexedInstanced(IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation);
+  MarkAPIActive();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(DRAW_INDEXED_INST);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_DrawIndexedInstanced(IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation);
-		
-		m_ContextRecord->AddChunk(scope.Get());
+  m_EmptyCommandList = false;
 
-		m_CurrentPipelineState->MarkReferenced(this, false);
-	}
-	else if(m_State == WRITING_IDLE)
-	{
-		m_CurrentPipelineState->MarkDirty(m_pDevice->GetResourceManager());
-	}
+  SERIALISE_TIME_CALL(m_pRealContext->DrawIndexedInstanced(IndexCountPerInstance, InstanceCount,
+                                                           StartIndexLocation, BaseVertexLocation,
+                                                           StartInstanceLocation));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::DrawIndexedInstanced);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_DrawIndexedInstanced(GET_SERIALISER, IndexCountPerInstance, InstanceCount,
+                                   StartIndexLocation, BaseVertexLocation, StartInstanceLocation);
+
+    m_ContextRecord->AddChunk(scope.Get());
+
+    m_CurrentPipelineState->MarkReferenced(this, false);
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_DrawInstanced(UINT VertexCountPerInstance_, UINT InstanceCount_, UINT StartVertexLocation_, UINT StartInstanceLocation_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_DrawInstanced(SerialiserType &ser,
+                                                         UINT VertexCountPerInstance,
+                                                         UINT InstanceCount, UINT StartVertexLocation,
+                                                         UINT StartInstanceLocation)
 {
-	SERIALISE_ELEMENT(uint32_t, VertexCountPerInstance, VertexCountPerInstance_);
-	SERIALISE_ELEMENT(uint32_t, InstanceCount, InstanceCount_);
-	SERIALISE_ELEMENT(uint32_t, StartVertexLocation, StartVertexLocation_);
-	SERIALISE_ELEMENT(uint32_t, StartInstanceLocation, StartInstanceLocation_);
+  SERIALISE_ELEMENT(VertexCountPerInstance);
+  SERIALISE_ELEMENT(InstanceCount);
+  SERIALISE_ELEMENT(StartVertexLocation);
+  SERIALISE_ELEMENT(StartInstanceLocation);
 
-	if(m_State <= EXECUTING)
-	{
-		m_pRealContext->DrawInstanced(VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
-	}
-	
-	const string desc = m_pSerialiser->GetDebugStr();
-	
-	Serialise_DebugMessages();
+  Serialise_DebugMessages(GET_SERIALISER);
 
-	if(m_State == READING)
-	{
-		AddEvent(DRAW_INST, desc);
-		string name = "DrawInstanced(" + ToStr::Get(VertexCountPerInstance)
-						+ ", " + ToStr::Get(InstanceCount) + ")";
+  SERIALISE_CHECK_READ_ERRORS();
 
-		FetchDrawcall draw;
-		draw.name = name;
-		draw.numIndices = VertexCountPerInstance;
-		draw.numInstances = InstanceCount;
-		draw.vertexOffset = StartVertexLocation;
-		draw.instanceOffset = StartInstanceLocation;
+  if(IsReplayingAndReading())
+  {
+    m_pRealContext->DrawInstanced(VertexCountPerInstance, InstanceCount, StartVertexLocation,
+                                  StartInstanceLocation);
 
-		draw.flags |= eDraw_Drawcall|eDraw_Instanced;
+    if(IsLoading(m_State))
+    {
+      RecordDrawStats(true, false, InstanceCount);
 
-		AddDrawcall(draw, true);
-	}
+      AddEvent();
 
-	return true;
+      DrawcallDescription draw;
+      draw.name = StringFormat::Fmt("DrawInstanced(%u, %u)", VertexCountPerInstance, InstanceCount);
+      draw.numIndices = VertexCountPerInstance;
+      draw.numInstances = InstanceCount;
+      draw.vertexOffset = StartVertexLocation;
+      draw.instanceOffset = StartInstanceLocation;
+
+      draw.flags |= DrawFlags::Drawcall | DrawFlags::Instanced;
+
+      AddDrawcall(draw, true);
+    }
+  }
+
+  return true;
 }
 
-void WrappedID3D11DeviceContext::DrawInstanced(UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation)
+void WrappedID3D11DeviceContext::DrawInstanced(UINT VertexCountPerInstance, UINT InstanceCount,
+                                               UINT StartVertexLocation, UINT StartInstanceLocation)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	m_pRealContext->DrawInstanced(VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
+  MarkAPIActive();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(DRAW_INST);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_DrawInstanced(VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
-		
-		m_ContextRecord->AddChunk(scope.Get());
+  m_EmptyCommandList = false;
 
-		m_CurrentPipelineState->MarkReferenced(this, false);
-	}
-	else if(m_State == WRITING_IDLE)
-	{
-		m_CurrentPipelineState->MarkDirty(m_pDevice->GetResourceManager());
-	}
+  SERIALISE_TIME_CALL(m_pRealContext->DrawInstanced(VertexCountPerInstance, InstanceCount,
+                                                    StartVertexLocation, StartInstanceLocation));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::DrawInstanced);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_DrawInstanced(GET_SERIALISER, VertexCountPerInstance, InstanceCount,
+                            StartVertexLocation, StartInstanceLocation);
+
+    m_ContextRecord->AddChunk(scope.Get());
+
+    m_CurrentPipelineState->MarkReferenced(this, false);
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_DrawIndexed(UINT IndexCount_, UINT StartIndexLocation_, INT BaseVertexLocation_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_DrawIndexed(SerialiserType &ser, UINT IndexCount,
+                                                       UINT StartIndexLocation,
+                                                       INT BaseVertexLocation)
 {
-	SERIALISE_ELEMENT(uint32_t, IndexCount, IndexCount_);
-	SERIALISE_ELEMENT(uint32_t, StartIndexLocation, StartIndexLocation_);
-	SERIALISE_ELEMENT(int32_t, BaseVertexLocation, BaseVertexLocation_);
+  SERIALISE_ELEMENT(IndexCount);
+  SERIALISE_ELEMENT(StartIndexLocation);
+  SERIALISE_ELEMENT(BaseVertexLocation);
 
-	if(m_State <= EXECUTING)
-	{
-		m_pRealContext->DrawIndexed(IndexCount, StartIndexLocation, BaseVertexLocation);
-	}
-	
-	const string desc = m_pSerialiser->GetDebugStr();
-	
-	Serialise_DebugMessages();
+  Serialise_DebugMessages(GET_SERIALISER);
 
-	if(m_State == READING)
-	{
-		AddEvent(DRAW_INDEXED, desc);
-		string name = "DrawIndexed(" + ToStr::Get(IndexCount) + ")";
+  SERIALISE_CHECK_READ_ERRORS();
 
-		FetchDrawcall draw;
-		draw.name = name;
-		draw.numIndices = IndexCount;
-		draw.vertexOffset = BaseVertexLocation;
-		draw.indexOffset = StartIndexLocation;
+  if(IsReplayingAndReading())
+  {
+    m_pRealContext->DrawIndexed(IndexCount, StartIndexLocation, BaseVertexLocation);
 
-		draw.flags |= eDraw_Drawcall|eDraw_UseIBuffer;
+    if(IsLoading(m_State))
+    {
+      RecordDrawStats(false, false, 1);
 
-		AddDrawcall(draw, true);
-	}
+      AddEvent();
 
-	return true;
+      DrawcallDescription draw;
+      draw.name = StringFormat::Fmt("DrawIndexed(%u)", IndexCount);
+      draw.numIndices = IndexCount;
+      draw.baseVertex = BaseVertexLocation;
+      draw.indexOffset = StartIndexLocation;
+
+      draw.flags |= DrawFlags::Drawcall | DrawFlags::Indexed;
+
+      AddDrawcall(draw, true);
+    }
+  }
+
+  return true;
 }
 
-void WrappedID3D11DeviceContext::DrawIndexed(UINT IndexCount, UINT StartIndexLocation, INT BaseVertexLocation)
+void WrappedID3D11DeviceContext::DrawIndexed(UINT IndexCount, UINT StartIndexLocation,
+                                             INT BaseVertexLocation)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	m_pRealContext->DrawIndexed(IndexCount, StartIndexLocation, BaseVertexLocation);
+  MarkAPIActive();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_SMALL_CONTEXT(DRAW_INDEXED);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_DrawIndexed(IndexCount, StartIndexLocation, BaseVertexLocation);
-		
-		m_ContextRecord->AddChunk(scope.Get());
+  m_EmptyCommandList = false;
 
-		m_CurrentPipelineState->MarkReferenced(this, false);
-	}
-	else if(m_State == WRITING_IDLE)
-	{
-		m_CurrentPipelineState->MarkDirty(m_pDevice->GetResourceManager());
-	}
+  SERIALISE_TIME_CALL(m_pRealContext->DrawIndexed(IndexCount, StartIndexLocation, BaseVertexLocation));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::DrawIndexed);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_DrawIndexed(GET_SERIALISER, IndexCount, StartIndexLocation, BaseVertexLocation);
+
+    m_ContextRecord->AddChunk(scope.Get());
+
+    m_CurrentPipelineState->MarkReferenced(this, false);
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_Draw(UINT VertexCount_, UINT StartVertexLocation_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_Draw(SerialiserType &ser, UINT VertexCount,
+                                                UINT StartVertexLocation)
 {
-	SERIALISE_ELEMENT(uint32_t, VertexCount, VertexCount_);
-	SERIALISE_ELEMENT(uint32_t, StartVertexLocation, StartVertexLocation_);
+  SERIALISE_ELEMENT(VertexCount);
+  SERIALISE_ELEMENT(StartVertexLocation);
 
-	if(m_State <= EXECUTING)
-	{
-		m_pRealContext->Draw(VertexCount, StartVertexLocation);
-	}
-	
-	const string desc = m_pSerialiser->GetDebugStr();
-	
-	Serialise_DebugMessages();
+  Serialise_DebugMessages(GET_SERIALISER);
 
-	if(m_State == READING)
-	{
-		AddEvent(DRAW, desc);
-		string name = "Draw(" + ToStr::Get(VertexCount) + ")";
+  SERIALISE_CHECK_READ_ERRORS();
 
-		FetchDrawcall draw;
-		draw.name = name;
-		draw.numIndices = VertexCount;
-		draw.vertexOffset = StartVertexLocation;
+  if(IsReplayingAndReading())
+  {
+    m_pRealContext->Draw(VertexCount, StartVertexLocation);
 
-		draw.flags |= eDraw_Drawcall;
+    if(IsLoading(m_State))
+    {
+      RecordDrawStats(false, false, 1);
 
-		AddDrawcall(draw, true);
-	}
+      AddEvent();
 
-	return true;
+      DrawcallDescription draw;
+      draw.name = StringFormat::Fmt("Draw(%u)", VertexCount);
+      draw.numIndices = VertexCount;
+      draw.vertexOffset = StartVertexLocation;
+
+      draw.flags |= DrawFlags::Drawcall;
+
+      AddDrawcall(draw, true);
+    }
+  }
+
+  return true;
 }
 
 void WrappedID3D11DeviceContext::Draw(UINT VertexCount, UINT StartVertexLocation)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	m_pRealContext->Draw(VertexCount, StartVertexLocation);
+  MarkAPIActive();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(DRAW);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_Draw(VertexCount, StartVertexLocation);
-		
-		m_ContextRecord->AddChunk(scope.Get());
+  m_EmptyCommandList = false;
 
-		m_CurrentPipelineState->MarkReferenced(this, false);
-	}
-	else if(m_State == WRITING_IDLE)
-	{
-		m_CurrentPipelineState->MarkDirty(m_pDevice->GetResourceManager());
-	}
+  SERIALISE_TIME_CALL(m_pRealContext->Draw(VertexCount, StartVertexLocation));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::Draw);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_Draw(GET_SERIALISER, VertexCount, StartVertexLocation);
+
+    m_ContextRecord->AddChunk(scope.Get());
+
+    m_CurrentPipelineState->MarkReferenced(this, false);
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_DrawAuto()
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_DrawAuto(SerialiserType &ser)
 {
-	uint64_t numVerts = 0;
+  Serialise_DebugMessages(GET_SERIALISER);
 
-	if(m_State <= EXECUTING)
-	{
-		// spec says that only the first vertex buffer is used
-		if(m_CurrentPipelineState->IA.VBs[0] == NULL)
-		{
-			RDCERR("DrawAuto() with VB 0 set to NULL!");
-		}
-		else
-		{
-			ResourceId id = GetIDForResource(m_CurrentPipelineState->IA.VBs[0]);
+  SERIALISE_CHECK_READ_ERRORS();
 
-			StreamOutData &data = m_StreamOutCounters[id];
+  uint64_t numVerts = 0;
 
-			// if we have a query, the stream-out data for this DrawAuto was generated
-			// in the captured frame, so we can do a legitimate DrawAuto()
-			if(data.query)
-			{
-				// shouldn't still be bound on output
-				RDCASSERT(!data.running);
-				
-				D3D11_QUERY_DATA_SO_STATISTICS numPrims;
+  if(IsReplayingAndReading())
+  {
+    // spec says that only the first vertex buffer is used
+    if(m_CurrentPipelineState->IA.VBs[0] == NULL)
+    {
+      m_pDevice->AddDebugMessage(MessageCategory::Execution, MessageSeverity::High,
+                                 MessageSource::IncorrectAPIUse,
+                                 "DrawAuto() with VB 0 set to NULL!");
+    }
+    else
+    {
+      ResourceId id = GetIDForDeviceChild(m_CurrentPipelineState->IA.VBs[0]);
 
-				HRESULT hr = S_FALSE;
+      StreamOutData &data = m_StreamOutCounters[id];
 
-				do 
-				{
-					hr = m_pRealContext->GetData(data.query, &numPrims, sizeof(D3D11_QUERY_DATA_SO_STATISTICS), 0);
-				} while(hr == S_FALSE);
+      // if we have a query, the stream-out data for this DrawAuto was generated
+      // in the captured frame, so we can do a legitimate DrawAuto()
+      if(data.query)
+      {
+        // shouldn't still be bound on output
+        RDCASSERT(!data.running);
 
-				if(m_CurrentPipelineState->IA.Topo == D3D11_PRIMITIVE_TOPOLOGY_POINTLIST)
-					numVerts = numPrims.NumPrimitivesWritten;
-				else if(m_CurrentPipelineState->IA.Topo == D3D11_PRIMITIVE_TOPOLOGY_LINELIST)
-					numVerts = numPrims.NumPrimitivesWritten*2;
-				else
-					numVerts = numPrims.NumPrimitivesWritten*3;
+        D3D11_QUERY_DATA_SO_STATISTICS numPrims;
 
-				m_pRealContext->DrawAuto();
-			}
-			else
-			{
-				if(m_CurrentPipelineState->IA.Topo == D3D11_PRIMITIVE_TOPOLOGY_POINTLIST)
-					numVerts = data.numPrims;
-				else if(m_CurrentPipelineState->IA.Topo == D3D11_PRIMITIVE_TOPOLOGY_LINELIST)
-					numVerts = data.numPrims*2;
-				else
-					numVerts = data.numPrims*3;
+        HRESULT hr = S_FALSE;
 
-				m_pRealContext->Draw((UINT)numVerts, 0);
-			}
-		}
-	}
-	
-	const string desc = m_pSerialiser->GetDebugStr();
-	
-	Serialise_DebugMessages();
+        do
+        {
+          hr = m_pRealContext->GetData(data.query, &numPrims,
+                                       sizeof(D3D11_QUERY_DATA_SO_STATISTICS), 0);
+        } while(hr == S_FALSE);
 
-	if(m_State == READING)
-	{
-		AddEvent(DRAW_AUTO, desc);
-		string name = "DrawAuto(<" + ToStr::Get(numVerts) + ">)";
+        if(m_CurrentPipelineState->IA.Topo == D3D11_PRIMITIVE_TOPOLOGY_POINTLIST)
+          numVerts = numPrims.NumPrimitivesWritten;
+        else if(m_CurrentPipelineState->IA.Topo == D3D11_PRIMITIVE_TOPOLOGY_LINELIST)
+          numVerts = numPrims.NumPrimitivesWritten * 2;
+        else
+          numVerts = numPrims.NumPrimitivesWritten * 3;
 
-		FetchDrawcall draw;
-		draw.name = name;
-		draw.flags |= eDraw_Drawcall|eDraw_Auto;
-		draw.numIndices = (uint32_t)numVerts;
-		draw.vertexOffset = 0;
-		draw.indexOffset = 0;
-		draw.instanceOffset = 0;
-		draw.numInstances = 1;
+        m_pRealContext->DrawAuto();
+      }
+      else
+      {
+        // otherwise use the cached value from the previous frame.
 
-		AddDrawcall(draw, true);
-	}
+        if(m_CurrentPipelineState->IA.Topo == D3D11_PRIMITIVE_TOPOLOGY_POINTLIST)
+          numVerts = data.numPrims;
+        else if(m_CurrentPipelineState->IA.Topo == D3D11_PRIMITIVE_TOPOLOGY_LINELIST)
+          numVerts = data.numPrims * 2;
+        else
+          numVerts = data.numPrims * 3;
 
-	return true;
+        m_pRealContext->Draw((UINT)numVerts, 0);
+      }
+    }
+
+    if(IsLoading(m_State))
+    {
+      RecordDrawStats(false, false, 1);
+
+      AddEvent();
+
+      DrawcallDescription draw;
+      draw.name = StringFormat::Fmt("DrawAuto(<%u>)", numVerts);
+      draw.flags |= DrawFlags::Drawcall | DrawFlags::Auto;
+      draw.numIndices = (uint32_t)numVerts;
+      draw.vertexOffset = 0;
+      draw.indexOffset = 0;
+      draw.instanceOffset = 0;
+      draw.numInstances = 1;
+
+      AddDrawcall(draw, true);
+    }
+  }
+
+  return true;
 }
 
 void WrappedID3D11DeviceContext::DrawAuto()
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	m_pRealContext->DrawAuto();
+  MarkAPIActive();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(DRAW_AUTO);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_DrawAuto();
-		
-		m_ContextRecord->AddChunk(scope.Get());
+  m_EmptyCommandList = false;
 
-		m_CurrentPipelineState->MarkReferenced(this, false);
-	}
-	else if(m_State == WRITING_IDLE)
-	{
-		m_CurrentPipelineState->MarkDirty(m_pDevice->GetResourceManager());
-	}
+  SERIALISE_TIME_CALL(m_pRealContext->DrawAuto());
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::DrawAuto);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_DrawAuto(GET_SERIALISER);
+
+    m_ContextRecord->AddChunk(scope.Get());
+
+    m_CurrentPipelineState->MarkReferenced(this, false);
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_DrawIndexedInstancedIndirect(ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_DrawIndexedInstancedIndirect(SerialiserType &ser,
+                                                                        ID3D11Buffer *pBufferForArgs,
+                                                                        UINT AlignedByteOffsetForArgs)
 {
-	SERIALISE_ELEMENT(ResourceId, BufferForArgs, GetIDForResource(pBufferForArgs));
-	SERIALISE_ELEMENT(uint32_t, AlignedByteOffsetForArgs, AlignedByteOffsetForArgs_);
-	
-	if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(BufferForArgs))
-	{
-		m_pRealContext->DrawIndexedInstancedIndirect(UNWRAP(WrappedID3D11Buffer, m_pDevice->GetResourceManager()->GetLiveResource(BufferForArgs)), AlignedByteOffsetForArgs);
-	}
-	
-	const string desc = m_pSerialiser->GetDebugStr();
-	
-	Serialise_DebugMessages();
+  SERIALISE_ELEMENT(pBufferForArgs);
+  SERIALISE_ELEMENT(AlignedByteOffsetForArgs);
 
-	if(m_State == READING)
-	{
-		AddEvent(DRAW, desc);
-		
-		FetchDrawcall draw;
+  Serialise_DebugMessages(GET_SERIALISER);
 
-		string name = "DrawIndexedInstancedIndirect(-, -)";
+  SERIALISE_CHECK_READ_ERRORS();
 
-		if(m_pDevice->GetResourceManager()->HasLiveResource(BufferForArgs))
-		{
-			ID3D11Buffer *argBuffer = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetLiveResource(BufferForArgs);
+  if(IsReplayingAndReading())
+  {
+    if(pBufferForArgs)
+    {
+      m_pRealContext->DrawIndexedInstancedIndirect(UNWRAP(WrappedID3D11Buffer, pBufferForArgs),
+                                                   AlignedByteOffsetForArgs);
+    }
 
-			vector<byte> args;
-			m_pDevice->GetDebugManager()->GetBufferData(argBuffer, AlignedByteOffsetForArgs, 5*sizeof(uint32_t), args, true);
-			uint32_t *uargs = (uint32_t *)&args[0];
+    if(IsLoading(m_State))
+    {
+      AddEvent();
 
-			name = "DrawIndexedInstancedIndirect(<" + ToStr::Get(uargs[0])
-			                   + ", " + ToStr::Get(uargs[1]) + ">)";
+      DrawcallDescription draw;
 
-			draw.numIndices = uargs[0];
-			draw.numInstances = uargs[1];
-			draw.indexOffset = uargs[2];
-			draw.vertexOffset = uargs[3];
-			draw.instanceOffset = uargs[4];
-		}
+      rdcstr name = "DrawIndexedInstancedIndirect(-, -)";
 
-		draw.name = name;
+      if(pBufferForArgs)
+      {
+        struct DrawArgs
+        {
+          uint32_t IndexCountPerInstance;
+          uint32_t InstanceCount;
+          uint32_t StartIndexLocation;
+          int32_t BaseVertexLocation;
+          uint32_t StartInstanceLocation;
+        };
 
-		draw.flags |= eDraw_Drawcall|eDraw_Instanced|eDraw_UseIBuffer|eDraw_Indirect;
+        bytebuf argarray;
+        m_pDevice->GetDebugManager()->GetBufferData(pBufferForArgs, AlignedByteOffsetForArgs,
+                                                    sizeof(DrawArgs), argarray);
 
-		AddDrawcall(draw, true);
-	}
+        if(argarray.size() >= sizeof(DrawArgs))
+        {
+          DrawArgs *args = (DrawArgs *)&argarray[0];
 
-	return true;
+          draw.numIndices = args->IndexCountPerInstance;
+          draw.numInstances = args->InstanceCount;
+          draw.indexOffset = args->StartIndexLocation;
+          draw.baseVertex = args->BaseVertexLocation;
+          draw.instanceOffset = args->StartInstanceLocation;
+
+          RecordDrawStats(true, true, draw.numInstances);
+
+          name = StringFormat::Fmt("DrawIndexedInstancedIndirect(<%u, %u>)", draw.numIndices,
+                                   draw.numInstances);
+        }
+        else
+        {
+          name = "DrawIndexedInstancedIndirect(<!, !>)";
+          D3D11_BUFFER_DESC bufDesc;
+
+          pBufferForArgs->GetDesc(&bufDesc);
+
+          if(AlignedByteOffsetForArgs >= bufDesc.ByteWidth)
+          {
+            m_pDevice->AddDebugMessage(
+                MessageCategory::Execution, MessageSeverity::High, MessageSource::IncorrectAPIUse,
+                StringFormat::Fmt("Call to DrawIndexedInstancedIndirect with buffer of %u "
+                                  "bytes, but byte offset specified is %u bytes.",
+                                  bufDesc.ByteWidth, AlignedByteOffsetForArgs));
+          }
+          else if(AlignedByteOffsetForArgs + sizeof(DrawArgs) >= bufDesc.ByteWidth)
+          {
+            m_pDevice->AddDebugMessage(
+                MessageCategory::Execution, MessageSeverity::High, MessageSource::IncorrectAPIUse,
+                StringFormat::Fmt("Call to DrawIndexedInstancedIndirect with buffer of %u "
+                                  "bytes at offset of %u bytes, which leaves less than %u bytes "
+                                  "for the arguments.",
+                                  bufDesc.ByteWidth, AlignedByteOffsetForArgs, sizeof(DrawArgs)));
+          }
+        }
+
+        m_ResourceUses[GetIDForDeviceChild(pBufferForArgs)].push_back(
+            EventUsage(m_CurEventID, ResourceUsage::Indirect));
+      }
+
+      draw.name = name;
+
+      draw.flags |=
+          DrawFlags::Drawcall | DrawFlags::Instanced | DrawFlags::Indexed | DrawFlags::Indirect;
+
+      AddDrawcall(draw, true);
+    }
+  }
+
+  return true;
 }
 
-void WrappedID3D11DeviceContext::DrawIndexedInstancedIndirect(ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs)
+void WrappedID3D11DeviceContext::DrawIndexedInstancedIndirect(ID3D11Buffer *pBufferForArgs,
+                                                              UINT AlignedByteOffsetForArgs)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	m_pRealContext->DrawIndexedInstancedIndirect(UNWRAP(WrappedID3D11Buffer, pBufferForArgs), AlignedByteOffsetForArgs);
+  MarkAPIActive();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(DRAW_INDEXED_INST_INDIRECT);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_DrawIndexedInstancedIndirect(pBufferForArgs, AlignedByteOffsetForArgs);
-		
-		m_ContextRecord->AddChunk(scope.Get());
+  m_EmptyCommandList = false;
 
-		m_CurrentPipelineState->MarkReferenced(this, false);
-	}
-	else if(m_State == WRITING_IDLE)
-	{
-		m_CurrentPipelineState->MarkDirty(m_pDevice->GetResourceManager());
-	}
+  SERIALISE_TIME_CALL(m_pRealContext->DrawIndexedInstancedIndirect(
+      UNWRAP(WrappedID3D11Buffer, pBufferForArgs), AlignedByteOffsetForArgs));
 
-	if(pBufferForArgs && m_State >= WRITING_CAPFRAME)
-		MarkResourceReferenced(GetIDForResource(pBufferForArgs), eFrameRef_Read);
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::DrawIndexedInstancedIndirect);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_DrawIndexedInstancedIndirect(GET_SERIALISER, pBufferForArgs, AlignedByteOffsetForArgs);
+
+    m_ContextRecord->AddChunk(scope.Get());
+
+    m_CurrentPipelineState->MarkReferenced(this, false);
+  }
+
+  if(pBufferForArgs && IsActiveCapturing(m_State))
+    MarkResourceReferenced(GetIDForDeviceChild(pBufferForArgs), eFrameRef_Read);
 }
 
-bool WrappedID3D11DeviceContext::Serialise_DrawInstancedIndirect(ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_DrawInstancedIndirect(SerialiserType &ser,
+                                                                 ID3D11Buffer *pBufferForArgs,
+                                                                 UINT AlignedByteOffsetForArgs)
 {
-	SERIALISE_ELEMENT(ResourceId, BufferForArgs, GetIDForResource(pBufferForArgs));
-	SERIALISE_ELEMENT(uint32_t, AlignedByteOffsetForArgs, AlignedByteOffsetForArgs_);
-	
-	if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(BufferForArgs))
-	{
-		m_pRealContext->DrawInstancedIndirect(UNWRAP(WrappedID3D11Buffer, m_pDevice->GetResourceManager()->GetLiveResource(BufferForArgs)), AlignedByteOffsetForArgs);
-	}
-	
-	const string desc = m_pSerialiser->GetDebugStr();
-	
-	Serialise_DebugMessages();
+  SERIALISE_ELEMENT(pBufferForArgs);
+  SERIALISE_ELEMENT(AlignedByteOffsetForArgs);
 
-	if(m_State == READING)
-	{
-		AddEvent(DRAW, desc);
-		
-		FetchDrawcall draw;
-		
-		string name = "DrawInstancedIndirect(-, -)";
-		if(m_pDevice->GetResourceManager()->HasLiveResource(BufferForArgs))
-		{
-			ID3D11Buffer *argBuffer = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetLiveResource(BufferForArgs);
-			
-			vector<byte> args;
-			m_pDevice->GetDebugManager()->GetBufferData(argBuffer, AlignedByteOffsetForArgs, 4*sizeof(uint32_t), args, true);
-			uint32_t *uargs = (uint32_t *)&args[0];
+  Serialise_DebugMessages(GET_SERIALISER);
 
-			name = "DrawInstancedIndirect(<" + ToStr::Get(uargs[0])
-							+ ", " + ToStr::Get(uargs[1]) + ">)";
+  SERIALISE_CHECK_READ_ERRORS();
 
-			draw.numIndices = uargs[0];
-			draw.numInstances = uargs[1];
-			draw.vertexOffset = uargs[2];
-			draw.instanceOffset = uargs[3];
-		}
+  if(IsReplayingAndReading())
+  {
+    if(pBufferForArgs)
+    {
+      m_pRealContext->DrawInstancedIndirect(UNWRAP(WrappedID3D11Buffer, pBufferForArgs),
+                                            AlignedByteOffsetForArgs);
+    }
 
-		draw.name = name;
+    if(IsLoading(m_State))
+    {
+      AddEvent();
 
-		draw.flags |= eDraw_Drawcall|eDraw_Instanced|eDraw_Indirect;
+      DrawcallDescription draw;
 
-		AddDrawcall(draw, true);
-	}
+      rdcstr name = "DrawInstancedIndirect(-, -)";
 
-	return true;
+      if(pBufferForArgs)
+      {
+        struct DrawArgs
+        {
+          uint32_t VertexCountPerInstance;
+          uint32_t InstanceCount;
+          uint32_t StartVertexLocation;
+          uint32_t StartInstanceLocation;
+        };
+
+        bytebuf argarray;
+        m_pDevice->GetDebugManager()->GetBufferData(pBufferForArgs, AlignedByteOffsetForArgs,
+                                                    sizeof(DrawArgs), argarray);
+
+        if(argarray.size() >= sizeof(DrawArgs))
+        {
+          DrawArgs *args = (DrawArgs *)&argarray[0];
+
+          draw.numIndices = args->VertexCountPerInstance;
+          draw.numInstances = args->InstanceCount;
+          draw.vertexOffset = args->StartVertexLocation;
+          draw.instanceOffset = args->StartInstanceLocation;
+
+          RecordDrawStats(true, true, draw.numInstances);
+
+          name = StringFormat::Fmt("DrawInstancedIndirect(<%u, %u>)", draw.numIndices,
+                                   draw.numInstances);
+        }
+        else
+        {
+          name = "DrawInstancedIndirect(<!, !>)";
+          D3D11_BUFFER_DESC bufDesc;
+
+          pBufferForArgs->GetDesc(&bufDesc);
+
+          if(AlignedByteOffsetForArgs >= bufDesc.ByteWidth)
+          {
+            m_pDevice->AddDebugMessage(
+                MessageCategory::Execution, MessageSeverity::High, MessageSource::IncorrectAPIUse,
+                StringFormat::Fmt("Call to DrawIndexedInstancedIndirect with buffer of %u "
+                                  "bytes, but byte offset specified is %u bytes.",
+                                  bufDesc.ByteWidth, AlignedByteOffsetForArgs));
+          }
+          else if(AlignedByteOffsetForArgs + sizeof(DrawArgs) >= bufDesc.ByteWidth)
+          {
+            m_pDevice->AddDebugMessage(
+                MessageCategory::Execution, MessageSeverity::High, MessageSource::IncorrectAPIUse,
+                StringFormat::Fmt("Call to DrawIndexedInstancedIndirect with buffer of %u "
+                                  "bytes at offset of %u bytes, which leaves less than %u bytes "
+                                  "for the arguments.",
+                                  bufDesc.ByteWidth, AlignedByteOffsetForArgs, sizeof(DrawArgs)));
+          }
+        }
+
+        m_ResourceUses[GetIDForDeviceChild(pBufferForArgs)].push_back(
+            EventUsage(m_CurEventID, ResourceUsage::Indirect));
+      }
+
+      draw.name = name;
+
+      draw.flags |= DrawFlags::Drawcall | DrawFlags::Instanced | DrawFlags::Indirect;
+
+      AddDrawcall(draw, true);
+    }
+  }
+
+  return true;
 }
 
-void WrappedID3D11DeviceContext::DrawInstancedIndirect(ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs)
+void WrappedID3D11DeviceContext::DrawInstancedIndirect(ID3D11Buffer *pBufferForArgs,
+                                                       UINT AlignedByteOffsetForArgs)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	m_pRealContext->DrawInstancedIndirect(UNWRAP(WrappedID3D11Buffer, pBufferForArgs), AlignedByteOffsetForArgs);
+  MarkAPIActive();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(DRAW_INST_INDIRECT);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_DrawInstancedIndirect(pBufferForArgs, AlignedByteOffsetForArgs);
-		
-		m_ContextRecord->AddChunk(scope.Get());
+  m_EmptyCommandList = false;
 
-		m_CurrentPipelineState->MarkReferenced(this, false);
-	}
-	else if(m_State == WRITING_IDLE)
-	{
-		m_CurrentPipelineState->MarkDirty(m_pDevice->GetResourceManager());
-	}
+  SERIALISE_TIME_CALL(m_pRealContext->DrawInstancedIndirect(
+      UNWRAP(WrappedID3D11Buffer, pBufferForArgs), AlignedByteOffsetForArgs));
 
-	if(pBufferForArgs && m_State >= WRITING_CAPFRAME)
-		MarkResourceReferenced(GetIDForResource(pBufferForArgs), eFrameRef_Read);
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::DrawInstancedIndirect);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_DrawInstancedIndirect(GET_SERIALISER, pBufferForArgs, AlignedByteOffsetForArgs);
+
+    m_ContextRecord->AddChunk(scope.Get());
+
+    m_CurrentPipelineState->MarkReferenced(this, false);
+  }
+
+  if(pBufferForArgs && IsActiveCapturing(m_State))
+    MarkResourceReferenced(GetIDForDeviceChild(pBufferForArgs), eFrameRef_Read);
 }
 
 #pragma endregion Draw
 
 #pragma region Compute Shader
 
-void WrappedID3D11DeviceContext::CSGetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D11Buffer **ppConstantBuffers)
+void WrappedID3D11DeviceContext::CSGetConstantBuffers(UINT StartSlot, UINT NumBuffers,
+                                                      ID3D11Buffer **ppConstantBuffers)
 {
-	if(ppConstantBuffers)
-	{
-		ID3D11Buffer *real[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
-		m_pRealContext->CSGetConstantBuffers(StartSlot, NumBuffers, real);
-	
-		for(UINT i=0; i < NumBuffers; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppConstantBuffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppConstantBuffers[i]);
+  if(ppConstantBuffers)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-			RDCASSERT(ppConstantBuffers[i] == m_CurrentPipelineState->CS.ConstantBuffers[i+StartSlot]);
-		}
-	}
+    ID3D11Buffer *real[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
+    m_pRealContext->CSGetConstantBuffers(StartSlot, NumBuffers, real);
+
+    for(UINT i = 0; i < NumBuffers; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppConstantBuffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppConstantBuffers[i]);
+
+      RDCASSERT(ppConstantBuffers[i] == m_CurrentPipelineState->CS.ConstantBuffers[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::CSGetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView **ppShaderResourceViews)
+void WrappedID3D11DeviceContext::CSGetShaderResources(UINT StartSlot, UINT NumViews,
+                                                      ID3D11ShaderResourceView **ppShaderResourceViews)
 {
-	if(ppShaderResourceViews)
-	{
-		ID3D11ShaderResourceView *real[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {0};
-		m_pRealContext->CSGetShaderResources(StartSlot, NumViews, real);
+  if(ppShaderResourceViews)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		for(UINT i=0; i < NumViews; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppShaderResourceViews[i] = (ID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppShaderResourceViews[i]);
+    ID3D11ShaderResourceView *real[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {0};
+    m_pRealContext->CSGetShaderResources(StartSlot, NumViews, real);
 
-			RDCASSERT(ppShaderResourceViews[i] == m_CurrentPipelineState->CS.SRVs[i+StartSlot]);
-		}
-	}
+    for(UINT i = 0; i < NumViews; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppShaderResourceViews[i] =
+          (ID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppShaderResourceViews[i]);
+
+      RDCASSERT(ppShaderResourceViews[i] == m_CurrentPipelineState->CS.SRVs[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::CSGetUnorderedAccessViews(UINT StartSlot, UINT NumUAVs, ID3D11UnorderedAccessView **ppUnorderedAccessViews)
+void WrappedID3D11DeviceContext::CSGetUnorderedAccessViews(
+    UINT StartSlot, UINT NumUAVs, ID3D11UnorderedAccessView **ppUnorderedAccessViews)
 {
-	if(ppUnorderedAccessViews)
-	{
-		ID3D11UnorderedAccessView *real[D3D11_1_UAV_SLOT_COUNT] = {0};
-		m_pRealContext->CSGetUnorderedAccessViews(StartSlot, NumUAVs, real);
+  if(ppUnorderedAccessViews)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		for(UINT i=0; i < NumUAVs; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppUnorderedAccessViews[i] = (ID3D11UnorderedAccessView *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppUnorderedAccessViews[i]);
+    ID3D11UnorderedAccessView *real[D3D11_1_UAV_SLOT_COUNT] = {0};
+    m_pRealContext->CSGetUnorderedAccessViews(StartSlot, NumUAVs, real);
 
-			RDCASSERT(ppUnorderedAccessViews[i] == m_CurrentPipelineState->CSUAVs[i+StartSlot]);
-		}
-	}
+    for(UINT i = 0; i < NumUAVs; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppUnorderedAccessViews[i] =
+          (ID3D11UnorderedAccessView *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppUnorderedAccessViews[i]);
+
+      RDCASSERT(ppUnorderedAccessViews[i] == m_CurrentPipelineState->CSUAVs[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::CSGetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState **ppSamplers)
+void WrappedID3D11DeviceContext::CSGetSamplers(UINT StartSlot, UINT NumSamplers,
+                                               ID3D11SamplerState **ppSamplers)
 {
-	if(ppSamplers)
-	{
-		ID3D11SamplerState *real[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {0};
-		m_pRealContext->CSGetSamplers(StartSlot, NumSamplers, real);
+  if(ppSamplers)
+  {
+    SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		for(UINT i=0; i < NumSamplers; i++)
-		{
-			SAFE_RELEASE_NOCLEAR(real[i]);
-			ppSamplers[i] = (ID3D11SamplerState *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
-			SAFE_ADDREF(ppSamplers[i]);
+    ID3D11SamplerState *real[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {0};
+    m_pRealContext->CSGetSamplers(StartSlot, NumSamplers, real);
 
-			RDCASSERT(ppSamplers[i] == m_CurrentPipelineState->CS.Samplers[i+StartSlot]);
-		}
-	}
+    for(UINT i = 0; i < NumSamplers; i++)
+    {
+      SAFE_RELEASE_NOCLEAR(real[i]);
+      ppSamplers[i] = (ID3D11SamplerState *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
+      SAFE_ADDREF(ppSamplers[i]);
+
+      RDCASSERT(ppSamplers[i] == m_CurrentPipelineState->CS.Samplers[i + StartSlot]);
+    }
+  }
 }
 
-void WrappedID3D11DeviceContext::CSGetShader(ID3D11ComputeShader **ppComputeShader, ID3D11ClassInstance **ppClassInstances, UINT *pNumClassInstances)
+void WrappedID3D11DeviceContext::CSGetShader(ID3D11ComputeShader **ppComputeShader,
+                                             ID3D11ClassInstance **ppClassInstances,
+                                             UINT *pNumClassInstances)
 {
-	if(ppComputeShader == NULL && ppClassInstances == NULL && pNumClassInstances == NULL)
-		return;
-	
-	ID3D11ClassInstance *realInsts[D3D11_SHADER_MAX_INTERFACES] = {0};
-	UINT numInsts = 0;
-	ID3D11ComputeShader *realShader = NULL;
-	m_pRealContext->CSGetShader(&realShader, realInsts, &numInsts);
-	
-	SAFE_RELEASE_NOCLEAR(realShader);
-	for(UINT i=0; i < numInsts; i++)
-		SAFE_RELEASE_NOCLEAR(realInsts[i]);
+  if(ppComputeShader == NULL && ppClassInstances == NULL && pNumClassInstances == NULL)
+    return;
 
-	if(ppComputeShader)
-	{
-		*ppComputeShader = (ID3D11ComputeShader *)m_pDevice->GetResourceManager()->GetWrapper(realShader);
-		SAFE_ADDREF(*ppComputeShader);
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-		RDCASSERT(*ppComputeShader == m_CurrentPipelineState->CS.Shader);
-	}
+  ID3D11ClassInstance *realInsts[D3D11_SHADER_MAX_INTERFACES] = {0};
+  UINT numInsts = 0;
+  ID3D11ComputeShader *realShader = NULL;
+  m_pRealContext->CSGetShader(&realShader, realInsts, &numInsts);
 
-	if(ppClassInstances)
-	{
-		for(UINT i=0; i < numInsts; i++)
-		{
-			ppClassInstances[i] = (ID3D11ClassInstance *)m_pDevice->GetResourceManager()->GetWrapper(realInsts[i]);
-			SAFE_ADDREF(ppClassInstances[i]);
+  SAFE_RELEASE_NOCLEAR(realShader);
+  for(UINT i = 0; i < numInsts; i++)
+    SAFE_RELEASE_NOCLEAR(realInsts[i]);
 
-			RDCASSERT(ppClassInstances[i] == m_CurrentPipelineState->CS.Instances[i]);
-		}
-	}
+  if(ppComputeShader)
+  {
+    *ppComputeShader = (ID3D11ComputeShader *)m_pDevice->GetResourceManager()->GetWrapper(realShader);
+    SAFE_ADDREF(*ppComputeShader);
 
-	if(pNumClassInstances)
-	{
-		*pNumClassInstances = numInsts;
-	}
+    RDCASSERT(*ppComputeShader == m_CurrentPipelineState->CS.Object);
+  }
+
+  if(ppClassInstances)
+  {
+    for(UINT i = 0; i < numInsts; i++)
+    {
+      ppClassInstances[i] =
+          (ID3D11ClassInstance *)m_pDevice->GetResourceManager()->GetWrapper(realInsts[i]);
+      SAFE_ADDREF(ppClassInstances[i]);
+
+      RDCASSERT(ppClassInstances[i] == m_CurrentPipelineState->CS.Instances[i]);
+    }
+  }
+
+  if(pNumClassInstances)
+  {
+    *pNumClassInstances = numInsts;
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_CSSetConstantBuffers(UINT StartSlot_, UINT NumBuffers_, ID3D11Buffer *const *ppConstantBuffers)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_CSSetConstantBuffers(SerialiserType &ser, UINT StartSlot,
+                                                                UINT NumBuffers,
+                                                                ID3D11Buffer *const *ppConstantBuffers)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumBuffers, NumBuffers_);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumBuffers);
+  SERIALISE_ELEMENT_ARRAY(ppConstantBuffers, NumBuffers);
 
-	ID3D11Buffer **Buffers = new ID3D11Buffer *[NumBuffers];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumBuffers; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppConstantBuffers[i]));
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordConstantStats(ShaderStage::Compute, NumBuffers, ppConstantBuffers);
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Buffers[i] = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Buffers[i] = NULL;
-	}
-	
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.ConstantBuffers, Buffers, StartSlot, NumBuffers);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->CS.CBOffsets, NullCBOffsets, StartSlot, NumBuffers);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->CS.CBCounts, NullCBCounts, StartSlot, NumBuffers);
-	
-		for(UINT i=0; i < NumBuffers; i++)
-			Buffers[i] = UNWRAP(WrappedID3D11Buffer, Buffers[i]);
-	
-		m_pRealContext->CSSetConstantBuffers(StartSlot, NumBuffers, Buffers);
-		VerifyState();
-	}
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.ConstantBuffers,
+                                          ppConstantBuffers, StartSlot, NumBuffers);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->CS.CBOffsets, NullCBOffsets, StartSlot,
+                                   NumBuffers);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->CS.CBCounts, NullCBCounts, StartSlot,
+                                   NumBuffers);
 
-	SAFE_DELETE_ARRAY(Buffers);
+    ID3D11Buffer *bufs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {0};
+    for(UINT i = 0; i < NumBuffers; i++)
+      bufs[i] = UNWRAP(WrappedID3D11Buffer, ppConstantBuffers[i]);
 
-	return true;
+    m_pRealContext->CSSetConstantBuffers(StartSlot, NumBuffers, bufs);
+    VerifyState();
+  }
+
+  return true;
 }
 
-void WrappedID3D11DeviceContext::CSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D11Buffer *const *ppConstantBuffers)
+void WrappedID3D11DeviceContext::CSSetConstantBuffers(UINT StartSlot, UINT NumBuffers,
+                                                      ID3D11Buffer *const *ppConstantBuffers)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_CS_CBUFFERS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_CSSetConstantBuffers(StartSlot, NumBuffers, ppConstantBuffers);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.ConstantBuffers, ppConstantBuffers, StartSlot, NumBuffers);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->CS.CBOffsets, NullCBOffsets, StartSlot, NumBuffers);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->CS.CBCounts, NullCBCounts, StartSlot, NumBuffers);
+  m_EmptyCommandList = false;
 
-	ID3D11Buffer *bufs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
-	for(UINT i=0; i < NumBuffers; i++)
-	{
-		if(ppConstantBuffers[i] && m_State >= WRITING_CAPFRAME)
-			MarkResourceReferenced(GetIDForResource(ppConstantBuffers[i]), eFrameRef_Read);
+  ID3D11Buffer *bufs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
+  for(UINT i = 0; i < NumBuffers; i++)
+  {
+    if(ppConstantBuffers[i] && IsActiveCapturing(m_State))
+      MarkResourceReferenced(GetIDForDeviceChild(ppConstantBuffers[i]), eFrameRef_Read);
 
-		bufs[i] = UNWRAP(WrappedID3D11Buffer, ppConstantBuffers[i]);
-	}
+    bufs[i] = UNWRAP(WrappedID3D11Buffer, ppConstantBuffers[i]);
+  }
 
-	m_pRealContext->CSSetConstantBuffers(StartSlot, NumBuffers, bufs);
-	VerifyState();
+  SERIALISE_TIME_CALL(m_pRealContext->CSSetConstantBuffers(StartSlot, NumBuffers, bufs));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::CSSetConstantBuffers);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_CSSetConstantBuffers(GET_SERIALISER, StartSlot, NumBuffers, ppConstantBuffers);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.ConstantBuffers,
+                                        ppConstantBuffers, StartSlot, NumBuffers);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->CS.CBOffsets, NullCBOffsets, StartSlot,
+                                 NumBuffers);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->CS.CBCounts, NullCBCounts, StartSlot,
+                                 NumBuffers);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_CSSetShaderResources(UINT StartSlot_, UINT NumViews_, ID3D11ShaderResourceView *const *ppShaderResourceViews)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_CSSetShaderResources(
+    SerialiserType &ser, UINT StartSlot, UINT NumViews,
+    ID3D11ShaderResourceView *const *ppShaderResourceViews)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumViews, NumViews_);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumViews);
+  SERIALISE_ELEMENT_ARRAY(ppShaderResourceViews, NumViews);
 
-	ID3D11ShaderResourceView **Views = new ID3D11ShaderResourceView *[NumViews];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumViews; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppShaderResourceViews[i]));
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordResourceStats(ShaderStage::Compute, NumViews, ppShaderResourceViews);
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Views[i] = (ID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Views[i] = NULL;
-	}
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.SRVs, ppShaderResourceViews,
+                                          StartSlot, NumViews);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.SRVs, Views, StartSlot, NumViews);
+    ID3D11ShaderResourceView *SRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
+    for(UINT i = 0; i < NumViews; i++)
+      SRVs[i] = UNWRAP(WrappedID3D11ShaderResourceView1, ppShaderResourceViews[i]);
 
-		for(UINT i=0; i < NumViews; i++)
-			Views[i] = UNWRAP(WrappedID3D11ShaderResourceView, Views[i]);
+    m_pRealContext->CSSetShaderResources(StartSlot, NumViews, SRVs);
+    VerifyState();
+  }
 
-		m_pRealContext->CSSetShaderResources(StartSlot, NumViews, Views);
-		VerifyState();
-	}
-
-	SAFE_DELETE_ARRAY(Views);
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::CSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView *const *ppShaderResourceViews)
+void WrappedID3D11DeviceContext::CSSetShaderResources(
+    UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView *const *ppShaderResourceViews)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_CS_RESOURCES);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_CSSetShaderResources(StartSlot, NumViews, ppShaderResourceViews);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.SRVs, ppShaderResourceViews, StartSlot, NumViews);
-	
-	ID3D11ShaderResourceView *SRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
-	for(UINT i=0; i < NumViews; i++)
-	{
-		if(ppShaderResourceViews[i] && m_State >= WRITING_CAPFRAME)
-		{
-			ID3D11Resource *res = NULL;
-			ppShaderResourceViews[i]->GetResource(&res);
-			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
-			SAFE_RELEASE(res);
-		}
+  m_EmptyCommandList = false;
 
-		SRVs[i] = UNWRAP(WrappedID3D11ShaderResourceView, ppShaderResourceViews[i]);
-	}
+  ID3D11ShaderResourceView *SRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
+  for(UINT i = 0; i < NumViews; i++)
+  {
+    if(ppShaderResourceViews[i] && IsActiveCapturing(m_State))
+    {
+      MarkResourceReferenced(GetIDForDeviceChild(ppShaderResourceViews[i]), eFrameRef_Read);
+      MarkResourceReferenced(GetViewResourceResID(ppShaderResourceViews[i]), eFrameRef_Read);
+    }
 
-	m_pRealContext->CSSetShaderResources(StartSlot, NumViews, SRVs);
-	VerifyState();
+    SRVs[i] = UNWRAP(WrappedID3D11ShaderResourceView1, ppShaderResourceViews[i]);
+  }
+
+  SERIALISE_TIME_CALL(m_pRealContext->CSSetShaderResources(StartSlot, NumViews, SRVs));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::CSSetShaderResources);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_CSSetShaderResources(GET_SERIALISER, StartSlot, NumViews, ppShaderResourceViews);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.SRVs, ppShaderResourceViews,
+                                        StartSlot, NumViews);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_CSSetUnorderedAccessViews(UINT StartSlot_, UINT NumUAVs_,
-														ID3D11UnorderedAccessView *const *ppUnorderedAccessViews, const UINT *pUAVInitialCounts)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_CSSetUnorderedAccessViews(
+    SerialiserType &ser, UINT StartSlot, UINT NumUAVs,
+    ID3D11UnorderedAccessView *const *ppUnorderedAccessViews, const UINT *pUAVInitialCounts)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumUAVs, NumUAVs_);
-	SERIALISE_ELEMENT(uint8_t, HasInitialCounts, pUAVInitialCounts != NULL);
-	SERIALISE_ELEMENT_ARR_OPT(uint32_t, UAVInitialCounts, pUAVInitialCounts, NumUAVs, HasInitialCounts);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumUAVs);
+  SERIALISE_ELEMENT_ARRAY(ppUnorderedAccessViews, NumUAVs);
+  SERIALISE_ELEMENT_ARRAY(pUAVInitialCounts, NumUAVs);
 
-	ID3D11UnorderedAccessView **UAVs = new ID3D11UnorderedAccessView *[NumUAVs];
-	
-	for(UINT i=0; i < NumUAVs; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppUnorderedAccessViews[i]));
+  SERIALISE_CHECK_READ_ERRORS();
 
-		UAVs[i] = NULL;
-	
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			UAVs[i] = (WrappedID3D11UnorderedAccessView *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-	}
+  if(IsReplayingAndReading())
+  {
+    m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->CSUAVs, ppUnorderedAccessViews,
+                                           StartSlot, NumUAVs);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->CSUAVs, UAVs, StartSlot, NumUAVs);
+    ID3D11UnorderedAccessView *UAVs[D3D11_1_UAV_SLOT_COUNT];
+    for(UINT i = 0; i < NumUAVs; i++)
+      UAVs[i] = UNWRAP(WrappedID3D11UnorderedAccessView1, ppUnorderedAccessViews[i]);
 
-		for(UINT i=0; i < NumUAVs; i++)
-			UAVs[i] = UNWRAP(WrappedID3D11UnorderedAccessView, UAVs[i]);
+    // #mivance this isn't strictly correct...
+    if(IsLoading(m_State))
+      RecordOutputMergerStats(0, NULL, NULL, StartSlot, NumUAVs, UAVs);
 
-		m_pRealContext->CSSetUnorderedAccessViews(StartSlot, NumUAVs, UAVs, UAVInitialCounts);
-		VerifyState();
-	}
+    m_pRealContext->CSSetUnorderedAccessViews(StartSlot, NumUAVs, UAVs, pUAVInitialCounts);
+    VerifyState();
+  }
 
-	SAFE_DELETE_ARRAY(UAVs);
-	SAFE_DELETE_ARRAY(UAVInitialCounts);
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::CSSetUnorderedAccessViews(UINT StartSlot, UINT NumUAVs, ID3D11UnorderedAccessView *const *ppUnorderedAccessViews,
-												 const UINT *pUAVInitialCounts)
+void WrappedID3D11DeviceContext::CSSetUnorderedAccessViews(
+    UINT StartSlot, UINT NumUAVs, ID3D11UnorderedAccessView *const *ppUnorderedAccessViews,
+    const UINT *pUAVInitialCounts)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_CS_UAVS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_CSSetUnorderedAccessViews(StartSlot, NumUAVs, ppUnorderedAccessViews, pUAVInitialCounts);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
+  m_EmptyCommandList = false;
 
-	m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->CSUAVs, ppUnorderedAccessViews, StartSlot, NumUAVs);
-	
-	ID3D11UnorderedAccessView *UAVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
-	for(UINT i=0; i < NumUAVs; i++)
-	{
-		if(ppUnorderedAccessViews[i] && m_State >= WRITING)
-		{
-			ID3D11Resource *res = NULL;
-			ppUnorderedAccessViews[i]->GetResource(&res);
-			
-			if(m_State == WRITING_IDLE)
-				m_pDevice->GetResourceManager()->MarkDirtyResource(GetIDForResource(res));
-			SAFE_RELEASE(res);
-		}
+  ID3D11UnorderedAccessView *UAVs[D3D11_1_UAV_SLOT_COUNT];
+  for(UINT i = 0; i < NumUAVs; i++)
+  {
+    if(ppUnorderedAccessViews[i] && IsCaptureMode(m_State))
+    {
+      if(IsActiveCapturing(m_State))
+      {
+        MarkResourceReferenced(GetIDForDeviceChild(ppUnorderedAccessViews[i]), eFrameRef_Read);
+        MarkResourceReferenced(GetViewResourceResID(ppUnorderedAccessViews[i]), eFrameRef_Read);
+      }
 
-		UAVs[i] = UNWRAP(WrappedID3D11UnorderedAccessView, ppUnorderedAccessViews[i]);
-	}
+      MarkDirtyResource(GetViewResourceResID(ppUnorderedAccessViews[i]));
+    }
 
-	m_pRealContext->CSSetUnorderedAccessViews(StartSlot, NumUAVs, UAVs, pUAVInitialCounts);
-	VerifyState();
+    UAVs[i] = UNWRAP(WrappedID3D11UnorderedAccessView1, ppUnorderedAccessViews[i]);
+  }
+
+  SERIALISE_TIME_CALL(
+      m_pRealContext->CSSetUnorderedAccessViews(StartSlot, NumUAVs, UAVs, pUAVInitialCounts));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::CSSetUnorderedAccessViews);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_CSSetUnorderedAccessViews(GET_SERIALISER, StartSlot, NumUAVs, ppUnorderedAccessViews,
+                                        pUAVInitialCounts);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->CSUAVs, ppUnorderedAccessViews,
+                                         StartSlot, NumUAVs);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_CSSetSamplers(UINT StartSlot_, UINT NumSamplers_, ID3D11SamplerState *const *ppSamplers)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_CSSetSamplers(SerialiserType &ser, UINT StartSlot,
+                                                         UINT NumSamplers,
+                                                         ID3D11SamplerState *const *ppSamplers)
 {
-	SERIALISE_ELEMENT(uint32_t, StartSlot, StartSlot_);
-	SERIALISE_ELEMENT(uint32_t, NumSamplers, NumSamplers_);
+  SERIALISE_ELEMENT(StartSlot);
+  SERIALISE_ELEMENT(NumSamplers);
+  SERIALISE_ELEMENT_ARRAY(ppSamplers, NumSamplers);
 
-	ID3D11SamplerState **Sampler = new ID3D11SamplerState *[NumSamplers];
+  SERIALISE_CHECK_READ_ERRORS();
 
-	for(UINT i=0; i < NumSamplers; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppSamplers[i]));
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordSamplerStats(ShaderStage::Compute, NumSamplers, ppSamplers);
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Sampler[i] = (ID3D11SamplerState *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Sampler[i] = NULL;
-	}
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.Samplers, ppSamplers,
+                                          StartSlot, NumSamplers);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.Samplers, Sampler, StartSlot, NumSamplers);
+    ID3D11SamplerState *samps[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
+    for(UINT i = 0; i < NumSamplers; i++)
+      samps[i] = UNWRAP(WrappedID3D11SamplerState, ppSamplers[i]);
 
-		for(UINT i=0; i < NumSamplers; i++)
-			Sampler[i] = UNWRAP(WrappedID3D11SamplerState, Sampler[i]);
+    m_pRealContext->CSSetSamplers(StartSlot, NumSamplers, samps);
+    VerifyState();
+  }
 
-		m_pRealContext->CSSetSamplers(StartSlot, NumSamplers, Sampler);
-		VerifyState();
-	}
-		
-	SAFE_DELETE_ARRAY(Sampler);
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::CSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D11SamplerState *const *ppSamplers)
+void WrappedID3D11DeviceContext::CSSetSamplers(UINT StartSlot, UINT NumSamplers,
+                                               ID3D11SamplerState *const *ppSamplers)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_CS_SAMPLERS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_CSSetSamplers(StartSlot, NumSamplers, ppSamplers);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.Samplers, ppSamplers, StartSlot, NumSamplers);
-	
-	ID3D11SamplerState *samps[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
-	for(UINT i=0; i < NumSamplers; i++)
-		samps[i] = UNWRAP(WrappedID3D11SamplerState, ppSamplers[i]);
+  m_EmptyCommandList = false;
 
-	m_pRealContext->CSSetSamplers(StartSlot, NumSamplers, samps);
-	VerifyState();
+  ID3D11SamplerState *samps[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
+  for(UINT i = 0; i < NumSamplers; i++)
+  {
+    if(ppSamplers[i] && IsActiveCapturing(m_State))
+      MarkResourceReferenced(GetIDForDeviceChild(ppSamplers[i]), eFrameRef_Read);
+
+    samps[i] = UNWRAP(WrappedID3D11SamplerState, ppSamplers[i]);
+  }
+
+  SERIALISE_TIME_CALL(m_pRealContext->CSSetSamplers(StartSlot, NumSamplers, samps));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::CSSetSamplers);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_CSSetSamplers(GET_SERIALISER, StartSlot, NumSamplers, ppSamplers);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.Samplers, ppSamplers, StartSlot,
+                                        NumSamplers);
+
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_CSSetShader(ID3D11ComputeShader *pShader, ID3D11ClassInstance *const *ppClassInstances, UINT NumClassInstances_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_CSSetShader(SerialiserType &ser,
+                                                       ID3D11ComputeShader *pShader,
+                                                       ID3D11ClassInstance *const *ppClassInstances,
+                                                       UINT NumClassInstances)
 {
-	SERIALISE_ELEMENT(ResourceId, Shader, GetIDForResource(pShader));
-	SERIALISE_ELEMENT(uint32_t, NumClassInstances, NumClassInstances_);
-	
-	ID3D11ClassInstance **Instances = new ID3D11ClassInstance *[NumClassInstances];
+  SERIALISE_ELEMENT(pShader);
+  SERIALISE_ELEMENT_ARRAY(ppClassInstances, NumClassInstances);
+  SERIALISE_ELEMENT(NumClassInstances);
 
-	for(UINT i=0; i < NumClassInstances; i++)
-	{
-		SERIALISE_ELEMENT(ResourceId, id, GetIDForResource(ppClassInstances[i]));
+  SERIALISE_CHECK_READ_ERRORS();
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(id))
-			Instances[i] = (ID3D11ClassInstance *)m_pDevice->GetResourceManager()->GetLiveResource(id);
-		else
-			Instances[i] = NULL;
-	}
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+      RecordShaderStats(ShaderStage::Compute, m_CurrentPipelineState->CS.Object, pShader);
 
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.Instances, Instances, 0, NumClassInstances);
-		m_CurrentPipelineState->Change(m_CurrentPipelineState->CS.NumInstances, NumClassInstances);
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.Instances, ppClassInstances, 0,
+                                          NumClassInstances);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->CS.NumInstances, NumClassInstances);
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.Object,
+                                          (ID3D11DeviceChild *)pShader);
 
-		for(UINT i=0; i < NumClassInstances; i++)
-			Instances[i] = UNWRAP(WrappedID3D11ClassInstance, Instances[i]);
-		
-		ID3D11DeviceChild *pSH = NULL;
-		if(m_pDevice->GetResourceManager()->HasLiveResource(Shader))
-			pSH = (ID3D11DeviceChild *)m_pDevice->GetResourceManager()->GetLiveResource(Shader);
-		m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.Shader, pSH);
-		m_pRealContext->CSSetShader(UNWRAP(WrappedID3D11Shader<ID3D11ComputeShader>, pSH), Instances, NumClassInstances);
-		VerifyState();
-	}
+    ID3D11ClassInstance *insts[D3D11_SHADER_MAX_INTERFACES] = {0};
+    for(UINT i = 0; i < NumClassInstances; i++)
+      insts[i] = UNWRAP(WrappedID3D11ClassInstance, ppClassInstances[i]);
 
-	SAFE_DELETE_ARRAY(Instances);
+    m_pRealContext->CSSetShader(UNWRAP(WrappedID3D11Shader<ID3D11ComputeShader>, pShader), insts,
+                                NumClassInstances);
+    VerifyState();
+  }
 
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::CSSetShader(ID3D11ComputeShader *pComputeShader, ID3D11ClassInstance *const *ppClassInstances, UINT NumClassInstances)
+void WrappedID3D11DeviceContext::CSSetShader(ID3D11ComputeShader *pComputeShader,
+                                             ID3D11ClassInstance *const *ppClassInstances,
+                                             UINT NumClassInstances)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_CS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_CSSetShader(pComputeShader, ppClassInstances, NumClassInstances);
-		
-		MarkResourceReferenced(GetIDForResource(pComputeShader), eFrameRef_Read);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.Shader, (ID3D11DeviceChild *)pComputeShader);
-	m_CurrentPipelineState->Change(m_CurrentPipelineState->CS.NumInstances, NumClassInstances);
-	m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.Instances, ppClassInstances, 0, NumClassInstances);
-	
-	ID3D11ClassInstance *insts[D3D11_SHADER_MAX_INTERFACES] = {0};
-	if(ppClassInstances && NumClassInstances > 0)
-		for(UINT i=0; i < NumClassInstances; i++)
-			insts[i] = UNWRAP(WrappedID3D11ClassInstance, ppClassInstances[i]);
-	
-	m_pRealContext->CSSetShader(UNWRAP(WrappedID3D11Shader<ID3D11ComputeShader>, pComputeShader), insts, NumClassInstances);
-	VerifyState();
+  m_EmptyCommandList = false;
+
+  ID3D11ClassInstance *insts[D3D11_SHADER_MAX_INTERFACES] = {0};
+  if(ppClassInstances && NumClassInstances > 0)
+    for(UINT i = 0; i < NumClassInstances; i++)
+      insts[i] = UNWRAP(WrappedID3D11ClassInstance, ppClassInstances[i]);
+
+  SERIALISE_TIME_CALL(m_pRealContext->CSSetShader(
+      UNWRAP(WrappedID3D11Shader<ID3D11ComputeShader>, pComputeShader), insts, NumClassInstances));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::CSSetShader);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_CSSetShader(GET_SERIALISER, pComputeShader, ppClassInstances, NumClassInstances);
+
+    MarkResourceReferenced(GetIDForDeviceChild(pComputeShader), eFrameRef_Read);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.Object,
+                                        (ID3D11DeviceChild *)pComputeShader);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->CS.NumInstances, NumClassInstances);
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->CS.Instances, ppClassInstances, 0,
+                                        NumClassInstances);
+
+  VerifyState();
 }
 
 #pragma endregion Compute Shader
 
+#pragma region Dispatch
+
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_Dispatch(SerialiserType &ser, UINT ThreadGroupCountX,
+                                                    UINT ThreadGroupCountY, UINT ThreadGroupCountZ)
+{
+  SERIALISE_ELEMENT(ThreadGroupCountX);
+  SERIALISE_ELEMENT(ThreadGroupCountY);
+  SERIALISE_ELEMENT(ThreadGroupCountZ);
+
+  Serialise_DebugMessages(GET_SERIALISER);
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    m_pRealContext->Dispatch(ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
+
+    if(IsLoading(m_State))
+    {
+      RecordDispatchStats(false);
+
+      AddEvent();
+
+      DrawcallDescription draw;
+      draw.name = StringFormat::Fmt("Dispatch(%u, %u, %u)", ThreadGroupCountX, ThreadGroupCountY,
+                                    ThreadGroupCountZ);
+      draw.flags |= DrawFlags::Dispatch;
+
+      draw.dispatchDimension[0] = ThreadGroupCountX;
+      draw.dispatchDimension[1] = ThreadGroupCountY;
+      draw.dispatchDimension[2] = ThreadGroupCountZ;
+
+      if(ThreadGroupCountX == 0)
+        m_pDevice->AddDebugMessage(
+            MessageCategory::Execution, MessageSeverity::Medium, MessageSource::IncorrectAPIUse,
+            "Dispatch call has ThreadGroup count X=0. This will do nothing, "
+            "which is unusual for a non-indirect Dispatch. Did you mean X=1?");
+      if(ThreadGroupCountY == 0)
+        m_pDevice->AddDebugMessage(
+            MessageCategory::Execution, MessageSeverity::Medium, MessageSource::IncorrectAPIUse,
+            "Dispatch call has ThreadGroup count Y=0. This will do nothing, "
+            "which is unusual for a non-indirect Dispatch. Did you mean Y=1?");
+      if(ThreadGroupCountZ == 0)
+        m_pDevice->AddDebugMessage(
+            MessageCategory::Execution, MessageSeverity::Medium, MessageSource::IncorrectAPIUse,
+            "Dispatch call has ThreadGroup count Z=0. This will do nothing, "
+            "which is unusual for a non-indirect Dispatch. Did you mean Z=1?");
+
+      AddDrawcall(draw, true);
+    }
+  }
+
+  return true;
+}
+
+void WrappedID3D11DeviceContext::Dispatch(UINT ThreadGroupCountX, UINT ThreadGroupCountY,
+                                          UINT ThreadGroupCountZ)
+{
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
+
+  DrainAnnotationQueue();
+
+  MarkAPIActive();
+
+  m_EmptyCommandList = false;
+
+  SERIALISE_TIME_CALL(
+      m_pRealContext->Dispatch(ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::Dispatch);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_Dispatch(GET_SERIALISER, ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
+
+    m_ContextRecord->AddChunk(scope.Get());
+
+    m_CurrentPipelineState->MarkReferenced(this, false);
+  }
+}
+
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_DispatchIndirect(SerialiserType &ser,
+                                                            ID3D11Buffer *pBufferForArgs,
+                                                            UINT AlignedByteOffsetForArgs)
+{
+  SERIALISE_ELEMENT(pBufferForArgs);
+  SERIALISE_ELEMENT(AlignedByteOffsetForArgs);
+
+  Serialise_DebugMessages(GET_SERIALISER);
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    if(pBufferForArgs)
+    {
+      m_pRealContext->DispatchIndirect(UNWRAP(WrappedID3D11Buffer, pBufferForArgs),
+                                       AlignedByteOffsetForArgs);
+    }
+
+    if(IsLoading(m_State))
+    {
+      RecordDispatchStats(true);
+
+      AddEvent();
+
+      DrawcallDescription draw;
+
+      rdcstr name = "DispatchIndirect(-, -, -)";
+      if(pBufferForArgs)
+      {
+        struct DispatchArgs
+        {
+          UINT ThreadGroupCountX;
+          UINT ThreadGroupCountY;
+          UINT ThreadGroupCountZ;
+        };
+
+        bytebuf argarray;
+        m_pDevice->GetDebugManager()->GetBufferData(pBufferForArgs, AlignedByteOffsetForArgs,
+                                                    sizeof(DispatchArgs), argarray);
+
+        if(argarray.size() >= sizeof(DispatchArgs))
+        {
+          DispatchArgs *args = (DispatchArgs *)&argarray[0];
+
+          draw.dispatchDimension[0] = args->ThreadGroupCountX;
+          draw.dispatchDimension[1] = args->ThreadGroupCountY;
+          draw.dispatchDimension[2] = args->ThreadGroupCountZ;
+
+          name = StringFormat::Fmt("DispatchIndirect(<%u, %u, %u>)", args->ThreadGroupCountX,
+                                   args->ThreadGroupCountY, args->ThreadGroupCountZ);
+        }
+        else
+        {
+          name = "DispatchIndirect(<!, !, !>)";
+          D3D11_BUFFER_DESC bufDesc;
+
+          pBufferForArgs->GetDesc(&bufDesc);
+
+          if(AlignedByteOffsetForArgs >= bufDesc.ByteWidth)
+          {
+            m_pDevice->AddDebugMessage(
+                MessageCategory::Execution, MessageSeverity::High, MessageSource::IncorrectAPIUse,
+                StringFormat::Fmt("Call to DispatchIndirect with buffer of %u "
+                                  "bytes, but byte offset specified is %u bytes.",
+                                  bufDesc.ByteWidth, AlignedByteOffsetForArgs));
+          }
+          else if(AlignedByteOffsetForArgs + sizeof(DispatchArgs) >= bufDesc.ByteWidth)
+          {
+            m_pDevice->AddDebugMessage(
+                MessageCategory::Execution, MessageSeverity::High, MessageSource::IncorrectAPIUse,
+                StringFormat::Fmt("Call to DispatchIndirect with buffer of %u "
+                                  "bytes at offset of %u bytes, which leaves less than %u bytes "
+                                  "for the arguments.",
+                                  bufDesc.ByteWidth, AlignedByteOffsetForArgs, sizeof(DispatchArgs)));
+          }
+        }
+
+        m_ResourceUses[GetIDForDeviceChild(pBufferForArgs)].push_back(
+            EventUsage(m_CurEventID, ResourceUsage::Indirect));
+      }
+
+      draw.name = name;
+      draw.flags |= DrawFlags::Dispatch | DrawFlags::Indirect;
+
+      AddDrawcall(draw, true);
+    }
+  }
+
+  return true;
+}
+
+void WrappedID3D11DeviceContext::DispatchIndirect(ID3D11Buffer *pBufferForArgs,
+                                                  UINT AlignedByteOffsetForArgs)
+{
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
+
+  DrainAnnotationQueue();
+
+  MarkAPIActive();
+
+  m_EmptyCommandList = false;
+
+  SERIALISE_TIME_CALL(m_pRealContext->DispatchIndirect(UNWRAP(WrappedID3D11Buffer, pBufferForArgs),
+                                                       AlignedByteOffsetForArgs));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::DispatchIndirect);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_DispatchIndirect(GET_SERIALISER, pBufferForArgs, AlignedByteOffsetForArgs);
+
+    m_ContextRecord->AddChunk(scope.Get());
+
+    m_CurrentPipelineState->MarkReferenced(this, false);
+  }
+
+  if(pBufferForArgs && IsActiveCapturing(m_State))
+    MarkResourceReferenced(GetIDForDeviceChild(pBufferForArgs), eFrameRef_Read);
+}
+
+#pragma endregion Dispatch
+
 #pragma region Execute
 
-bool WrappedID3D11DeviceContext::Serialise_ExecuteCommandList(ID3D11CommandList *pCommandList, BOOL RestoreContextState_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_ExecuteCommandList(SerialiserType &ser,
+                                                              ID3D11CommandList *pCommandList,
+                                                              BOOL RestoreContextState_)
 {
-	SERIALISE_ELEMENT(uint8_t, RestoreContextState, RestoreContextState_ == TRUE);
-	SERIALISE_ELEMENT(ResourceId, cmdList, GetIDForResource(pCommandList));
+  SERIALISE_ELEMENT_LOCAL(CommandList, GetIDForDeviceChild(pCommandList))
+      .TypedAs("ID3D11CommandList *"_lit);
+  SERIALISE_ELEMENT_LOCAL(RestoreContextState, bool(RestoreContextState_ == TRUE));
 
-	RDCASSERT(GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE);
-	
-	if(m_State <= EXECUTING)
-	{
-		if(m_pDevice->GetResourceManager()->HasLiveResource(cmdList))
-			m_pRealContext->ExecuteCommandList(UNWRAP(WrappedID3D11CommandList, m_pDevice->GetResourceManager()->GetLiveResource(cmdList)), RestoreContextState);
-		else
-			RDCERR("Don't have command list serialised for %llu", cmdList);
+  Serialise_DebugMessages(GET_SERIALISER);
 
-		if(!RestoreContextState)
-			m_CurrentPipelineState->Clear();
+  SERIALISE_CHECK_READ_ERRORS();
 
-		VerifyState();
-	}
-	
-	const string desc = m_pSerialiser->GetDebugStr();
-	
-	Serialise_DebugMessages();
+  if(IsReplayingAndReading())
+  {
+    // The serialise of exec happens at the start of the inserted linearised commands from the
+    // deferred command list. So if we're going to restore context state afterwards, save off our
+    // current state. This will be restored in the Serialise_PostExecuteCommandList chunk.
+    if(RestoreContextState)
+    {
+      SAFE_DELETE(m_DeferredSavedState);
+      m_DeferredSavedState = new D3D11RenderState(this);
+    }
 
-	if(m_State == READING)
-	{
-		string name = "ExecuteCommandList(" + ToStr::Get(cmdList) + ")";
+    // From the Docs:
+    // "Immediate context state is cleared before and after a command list is executed. A command
+    // list has no concept of inheritance."
+    ClearState();
 
-		FetchDrawcall draw;
-		draw.name = name;
-		draw.flags |= eDraw_CmdList|eDraw_PushMarker;
+    if(IsLoading(m_State))
+    {
+      DrawcallDescription draw;
+      draw.name = StringFormat::Fmt("ExecuteCommandList(List %s)", ToStr(CommandList).c_str());
+      draw.flags |= DrawFlags::CmdList;
 
-		AddDrawcall(draw, true);
+      AddDrawcall(draw, true);
+    }
+  }
 
-		auto cmdDrawChildren = m_CmdLists.find(cmdList);
-
-		if(!m_DrawcallStack.empty() && !m_DrawcallStack.back()->children.empty() &&
-			 cmdDrawChildren != m_CmdLists.end())
-		{
-			m_DrawcallStack.back()->children.back().children = cmdDrawChildren->second.children;
-
-			// assign new drawcall IDs so that we don't get duplicates if this commandlist is executed again
-			RefreshDrawcallIDs(cmdDrawChildren->second);
-		}
-	}
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::ExecuteCommandList(ID3D11CommandList *pCommandList, BOOL RestoreContextState)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_PostExecuteCommandList(SerialiserType &ser,
+                                                                  ID3D11CommandList *pCommandList,
+                                                                  BOOL RestoreContextState_)
 {
-	DrainAnnotationQueue();
+  SERIALISE_ELEMENT_LOCAL(CommandList, GetIDForDeviceChild(pCommandList))
+      .TypedAs("ID3D11CommandList *"_lit);
+  SERIALISE_ELEMENT_LOCAL(RestoreContextState, bool(RestoreContextState_ == TRUE));
 
-	m_EmptyCommandList = false;
-	
-	RDCASSERT(GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE);
-
-	m_pRealContext->ExecuteCommandList(UNWRAP(WrappedID3D11CommandList, pCommandList), RestoreContextState);
-
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(EXECUTE_CMD_LIST);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_ExecuteCommandList(pCommandList, RestoreContextState);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-
-		WrappedID3D11CommandList *wrapped = (WrappedID3D11CommandList *)pCommandList;
-
-		if(!wrapped->IsCaptured())
-		{
-			// we don't have this command list captured. This frame is no longer successful
-			RDCWARN("Don't have command list %llu captured! This frame is unsuccessful.", wrapped->GetResourceID());
-			m_SuccessfulCapture = false;
-			m_FailureReason = CaptureFailed_UncappedCmdlist;
-		}
-		else
-		{
-			RDCDEBUG("Executed successful command list %llu", wrapped->GetResourceID());
-			ResourceId contextId = wrapped->GetResourceID();
-
-			D3D11ResourceRecord *cmdListRecord = m_pDevice->GetResourceManager()->GetResourceRecord(contextId);
-
-			if(m_DeferredRecords.find(cmdListRecord) == m_DeferredRecords.end())
-			{
-				m_DeferredRecords.insert(cmdListRecord);
-				cmdListRecord->AddRef();
-			}
-
-			cmdListRecord->AddResourceReferences(m_pDevice->GetResourceManager());
-		}
-
-		m_CurrentPipelineState->MarkReferenced(this, false);
-	}
-	else if(m_State == WRITING_IDLE)
-	{
-		m_CurrentPipelineState->MarkDirty(m_pDevice->GetResourceManager());
-	}
-
-	if(!RestoreContextState)
-		m_CurrentPipelineState->Clear();
-
-	VerifyState();
+  // this is a 'fake' call we insert after executing, to give us a chance to restore the state.
+  if(IsReplayingAndReading())
+  {
+    if(RestoreContextState)
+    {
+      if(m_DeferredSavedState)
+      {
+        m_DeferredSavedState->ApplyState(this);
+        SAFE_DELETE(m_DeferredSavedState);
+      }
+      else
+      {
+        RDCERR("Expected to have saved state from before execute saved, but didn't find one.");
+      }
+    }
+    else
+    {
+      // if we don't restore the state, then it's cleared. There's no inheritance down from the
+      // deferred context's state to the immediate context.
+      ClearState();
+    }
+  }
+  return true;
 }
 
-bool WrappedID3D11DeviceContext::Serialise_Dispatch(UINT ThreadGroupCountX_, UINT ThreadGroupCountY_, UINT ThreadGroupCountZ_)
+void WrappedID3D11DeviceContext::ExecuteCommandList(ID3D11CommandList *pCommandList,
+                                                    BOOL RestoreContextState)
 {
-	SERIALISE_ELEMENT(uint32_t, ThreadGroupCountX, ThreadGroupCountX_);
-	SERIALISE_ELEMENT(uint32_t, ThreadGroupCountY, ThreadGroupCountY_);
-	SERIALISE_ELEMENT(uint32_t, ThreadGroupCountZ, ThreadGroupCountZ_);
-	
-	if(m_State <= EXECUTING)
-	{
-		m_pRealContext->Dispatch(ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
-	}
-	
-	const string desc = m_pSerialiser->GetDebugStr();
-	
-	Serialise_DebugMessages();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	if(m_State == READING)
-	{
-		AddEvent(DISPATCH, desc);
-		string name = "Dispatch("
-						+ ToStr::Get(ThreadGroupCountX) + ", "
-						+ ToStr::Get(ThreadGroupCountY) + ", "
-						+ ToStr::Get(ThreadGroupCountZ) + ")";
+  DrainAnnotationQueue();
 
-		FetchDrawcall draw;
-		draw.name = name;
-		draw.flags |= eDraw_Dispatch;
+  m_EmptyCommandList = false;
 
-		draw.dispatchDimension[0] = ThreadGroupCountX;
-		draw.dispatchDimension[1] = ThreadGroupCountY;
-		draw.dispatchDimension[2] = ThreadGroupCountZ;
+  RDCASSERT(GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE);
 
-		if(ThreadGroupCountX == 0)
-			m_pDevice->AddDebugMessage(eDbgCategory_Execution, eDbgSeverity_Medium, eDbgSource_IncorrectAPIUse,
-				"Dispatch call has ThreadGroup count X=0. This will do nothing, which is unusual for a non-indirect Dispatch. Did you mean X=1?");
-		if(ThreadGroupCountY == 0)
-			m_pDevice->AddDebugMessage(eDbgCategory_Execution, eDbgSeverity_Medium, eDbgSource_IncorrectAPIUse,
-				"Dispatch call has ThreadGroup count Y=0. This will do nothing, which is unusual for a non-indirect Dispatch. Did you mean Y=1?");
-		if(ThreadGroupCountZ == 0)
-			m_pDevice->AddDebugMessage(eDbgCategory_Execution, eDbgSeverity_Medium, eDbgSource_IncorrectAPIUse,
-				"Dispatch call has ThreadGroup count Z=0. This will do nothing, which is unusual for a non-indirect Dispatch. Did you mean Z=1?");
+  SERIALISE_TIME_CALL(m_pRealContext->ExecuteCommandList(
+      UNWRAP(WrappedID3D11CommandList, pCommandList), RestoreContextState));
 
-		AddDrawcall(draw, true);
-	}
+  if(IsActiveCapturing(m_State))
+  {
+    {
+      USE_SCRATCH_SERIALISER();
+      GET_SERIALISER.SetDrawChunk();
+      SCOPED_SERIALISE_CHUNK(D3D11Chunk::ExecuteCommandList);
+      SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+      Serialise_ExecuteCommandList(GET_SERIALISER, pCommandList, RestoreContextState);
+      m_ContextRecord->AddChunk(scope.Get());
+    }
 
-	return true;
+    WrappedID3D11CommandList *wrapped = (WrappedID3D11CommandList *)pCommandList;
+
+    if(!wrapped->IsCaptured())
+    {
+      // we don't have this command list captured. This frame is no longer successful
+      RDCWARN("Don't have command list %s captured! This frame is unsuccessful.",
+              ToStr(wrapped->GetResourceID()).c_str());
+      m_SuccessfulCapture = false;
+      m_FailureReason = CaptureFailed_UncappedCmdlist;
+    }
+    else
+    {
+      RDCDEBUG("Executed successful command list %s", ToStr(wrapped->GetResourceID()).c_str());
+      ResourceId contextId = wrapped->GetResourceID();
+
+      D3D11ResourceRecord *cmdListRecord =
+          m_pDevice->GetResourceManager()->GetResourceRecord(contextId);
+
+      RDCASSERT(cmdListRecord);
+
+      // insert all the deferred chunks immediately following the execute chunk.
+      m_ContextRecord->AppendFrom(cmdListRecord);
+      cmdListRecord->AddResourceReferences(m_pDevice->GetResourceManager());
+    }
+
+    {
+      // insert a chunk to let us know on replay that we finished the command list's
+      // chunks and we can restore the state
+      USE_SCRATCH_SERIALISER();
+      SCOPED_SERIALISE_CHUNK(D3D11Chunk::PostExecuteCommandList);
+      SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+      Serialise_PostExecuteCommandList(GET_SERIALISER, pCommandList, RestoreContextState);
+      m_ContextRecord->AddChunk(scope.Get());
+    }
+
+    m_CurrentPipelineState->MarkReferenced(this, false);
+  }
+  else if(IsBackgroundCapturing(m_State))
+  {
+    WrappedID3D11CommandList *wrapped = (WrappedID3D11CommandList *)pCommandList;
+
+    wrapped->MarkDirtyResources(m_pDevice->GetResourceManager());
+  }
+
+  if(!RestoreContextState)
+    m_CurrentPipelineState->Clear();
+
+  VerifyState();
 }
 
-void WrappedID3D11DeviceContext::Dispatch(UINT ThreadGroupCountX, UINT ThreadGroupCountY, UINT ThreadGroupCountZ)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_FinishCommandList(SerialiserType &ser,
+                                                             BOOL RestoreDeferredContextState_,
+                                                             ID3D11CommandList **ppCommandList)
 {
-	DrainAnnotationQueue();
+  SERIALISE_ELEMENT_LOCAL(RestoreDeferredContextState, bool(RestoreDeferredContextState_ == TRUE));
+  SERIALISE_ELEMENT_LOCAL(pCommandList, GetIDForDeviceChild(*ppCommandList))
+      .TypedAs("ID3D11CommandList *"_lit);
 
-	m_EmptyCommandList = false;
+  Serialise_DebugMessages(GET_SERIALISER);
 
-	m_pRealContext->Dispatch(ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
+  if(IsReplayingAndReading() && IsLoading(m_State))
+  {
+    AddEvent();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(DISPATCH);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_Dispatch(ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
-		
-		m_ContextRecord->AddChunk(scope.Get());
+    DrawcallDescription draw;
+    draw.name = StringFormat::Fmt("FinishCommandList(List %s)", ToStr(pCommandList).c_str());
+    draw.flags |= DrawFlags::CmdList;
 
-		m_CurrentPipelineState->MarkReferenced(this, false);
-	}
-	else if(m_State == WRITING_IDLE)
-	{
-		m_CurrentPipelineState->MarkDirty(m_pDevice->GetResourceManager());
-	}
+    AddDrawcall(draw, true);
+
+    m_pDevice->AddResource(pCommandList, ResourceType::CommandBuffer, "Command List");
+
+    // add the current deferred context ID as a parent
+    m_pDevice->GetResourceDesc(m_CurContextId).derivedResources.push_back(pCommandList);
+    m_pDevice->GetResourceDesc(pCommandList).parentResources.push_back(m_CurContextId);
+
+    // don't include this as an 'initialisation chunk'
+    m_pDevice->GetResourceDesc(pCommandList).initialisationChunks.clear();
+  }
+
+  return true;
 }
 
-bool WrappedID3D11DeviceContext::Serialise_DispatchIndirect(ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_PostFinishCommandListSet(SerialiserType &ser,
+                                                                    ID3D11CommandList *pCommandList)
 {
-	SERIALISE_ELEMENT(ResourceId, BufferForArgs, GetIDForResource(pBufferForArgs));
-	SERIALISE_ELEMENT(uint32_t, AlignedByteOffsetForArgs, AlignedByteOffsetForArgs_);
-	
-	if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(BufferForArgs))
-	{
-		m_pRealContext->DispatchIndirect(UNWRAP(WrappedID3D11Buffer, m_pDevice->GetResourceManager()->GetLiveResource(BufferForArgs)), AlignedByteOffsetForArgs);
-	}
-		
-	const string desc = m_pSerialiser->GetDebugStr();
-	
-	Serialise_DebugMessages();
+  SERIALISE_ELEMENT_LOCAL(CommandList, GetIDForDeviceChild(pCommandList))
+      .TypedAs("ID3D11CommandList *"_lit);
 
-	if(m_State == READING)
-	{
-		AddEvent(DISPATCH_INDIRECT, desc);
-		
-		FetchDrawcall draw;
+  D3D11RenderState RenderState(*m_CurrentPipelineState);
 
-		string name = "DispatchIndirect(-, -, -)";
-		if(m_pDevice->GetResourceManager()->HasLiveResource(BufferForArgs))
-		{
-			ID3D11Buffer *argBuffer = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetLiveResource(BufferForArgs);
+  SERIALISE_ELEMENT(RenderState).Named("Initial Pipeline State"_lit);
 
-			vector<byte> args;
-			m_pDevice->GetDebugManager()->GetBufferData(argBuffer, AlignedByteOffsetForArgs, 5*sizeof(uint32_t), args, true);
-			uint32_t *uargs = (uint32_t *)&args[0];
+  SERIALISE_CHECK_READ_ERRORS();
 
-			name = "DispatchIndirect(<" + ToStr::Get(uargs[0])
-							+ ", " + ToStr::Get(uargs[1]) + 
-							+ ", " + ToStr::Get(uargs[2]) + ">)";
-
-			draw.dispatchDimension[0] = uargs[0];
-			draw.dispatchDimension[1] = uargs[1];
-			draw.dispatchDimension[2] = uargs[2];
-		}
-
-		draw.name = name;
-		draw.flags |= eDraw_Dispatch|eDraw_Indirect;
-
-		AddDrawcall(draw, true);
-	}
-
-	return true;
+  // this is a 'fake' call we insert after finishing in a fresh deferred context, to allow us to
+  // preserve the state after a previous finish stole all the serialised chunks.
+  if(IsReplayingAndReading())
+  {
+    RenderState.ApplyState(this);
+  }
+  return true;
 }
 
-void WrappedID3D11DeviceContext::DispatchIndirect(ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs)
+HRESULT WrappedID3D11DeviceContext::FinishCommandList(BOOL RestoreDeferredContextState,
+                                                      ID3D11CommandList **ppCommandList)
 {
-	DrainAnnotationQueue();
+  if(GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE)
+  {
+    m_pDevice->AddDebugMessage(MessageCategory::Execution, MessageSeverity::High,
+                               MessageSource::IncorrectAPIUse,
+                               "It is invalid to call FinishCommandList on an immediate context. "
+                               "The call has been dropped from the capture.");
+    return DXGI_ERROR_INVALID_CALL;
+  }
 
-	m_EmptyCommandList = false;
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_pRealContext->DispatchIndirect(UNWRAP(WrappedID3D11Buffer, pBufferForArgs), AlignedByteOffsetForArgs);
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(DISPATCH_INDIRECT);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_DispatchIndirect(pBufferForArgs, AlignedByteOffsetForArgs);
-		
-		m_ContextRecord->AddChunk(scope.Get());
+  ID3D11CommandList *real = NULL;
+  HRESULT hr;
+  SERIALISE_TIME_CALL(hr = m_pRealContext->FinishCommandList(RestoreDeferredContextState, &real));
 
-		m_CurrentPipelineState->MarkReferenced(this, false);
-	}
-	else if(m_State == WRITING_IDLE)
-	{
-		m_CurrentPipelineState->MarkDirty(m_pDevice->GetResourceManager());
-	}
+  RDCASSERT(GetType() == D3D11_DEVICE_CONTEXT_DEFERRED);
 
-	if(pBufferForArgs && m_State >= WRITING_CAPFRAME)
-		MarkResourceReferenced(GetIDForResource(pBufferForArgs), eFrameRef_Read);
+  bool cmdListSuccessful = m_SuccessfulCapture;
+
+  if(!IsActiveCapturing(m_State) && !m_EmptyCommandList)
+    cmdListSuccessful = false;
+
+  WrappedID3D11CommandList *wrapped =
+      new WrappedID3D11CommandList(real, m_pDevice, this, cmdListSuccessful);
+
+  if(IsCaptureMode(m_State))
+  {
+    RDCASSERT(m_pDevice->GetResourceManager()->GetResourceRecord(wrapped->GetResourceID()) == NULL);
+
+    D3D11ResourceRecord *record =
+        m_pDevice->GetResourceManager()->AddResourceRecord(wrapped->GetResourceID());
+    record->Length = 0;
+    record->InternalResource = true;
+
+    if(IsActiveCapturing(m_State))
+    {
+      // if we got here and m_SuccessfulCapture is on, we have captured everything in this command
+      // list
+      if(m_SuccessfulCapture)
+      {
+        RDCDEBUG("Deferred Context %s Finish()'d successfully! Got successful command list %s",
+                 ToStr(GetResourceID()).c_str(), ToStr(wrapped->GetResourceID()).c_str());
+
+        RDCASSERT(wrapped->IsCaptured());
+
+        ID3D11CommandList *w = wrapped;
+
+        // serialise the finish marker
+        {
+          USE_SCRATCH_SERIALISER();
+          GET_SERIALISER.SetDrawChunk();
+          SCOPED_SERIALISE_CHUNK(D3D11Chunk::FinishCommandList);
+          SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+          Serialise_FinishCommandList(GET_SERIALISER, RestoreDeferredContextState, &w);
+          m_ContextRecord->AddChunk(scope.Get());
+        }
+
+        D3D11ResourceRecord *r =
+            m_pDevice->GetResourceManager()->GetResourceRecord(wrapped->GetResourceID());
+        RDCASSERT(r);
+
+        // swap our chunks, references, and dirty resources with the 'baked' command list.
+        m_ContextRecord->SwapChunks(r);
+        wrapped->SwapReferences(m_DeferredReferences);
+        wrapped->SwapDirtyResources(m_DeferredDirty);
+      }
+      else    // !m_SuccessfulCapture
+      {
+        RDCDEBUG(
+            "Deferred Context %s wasn't successful, but now we've Finish()'d so it is! Produced "
+            "unsuccessful command list %s.",
+            ToStr(GetResourceID()).c_str(), ToStr(wrapped->GetResourceID()).c_str());
+
+        RDCASSERT(!wrapped->IsCaptured());
+
+        // need to clear out anything we had serialised before
+        m_ContextRecord->LockChunks();
+        while(m_ContextRecord->HasChunks())
+        {
+          Chunk *chunk = m_ContextRecord->GetLastChunk();
+          chunk->Delete();
+          m_ContextRecord->PopChunk();
+        }
+        m_ContextRecord->UnlockChunks();
+
+        // clear the references, and delete the resource records so they aren't kept around forever
+        for(ResourceId id : m_DeferredReferences)
+        {
+          D3D11ResourceRecord *deferredRecord =
+              m_pDevice->GetResourceManager()->GetResourceRecord(id);
+          if(deferredRecord)
+            deferredRecord->Delete(m_pDevice->GetResourceManager());
+        }
+
+        m_DeferredReferences.clear();
+
+        // clear the dirty marks
+        m_DeferredDirty.clear();
+
+        // It's now 'successful' again, being empty
+        m_SuccessfulCapture = true;
+      }
+
+      // if we're supposed to restore, save the state to restore to now. This is because the next
+      // recording to this deferred context is expected to have the same state, but we don't have
+      // that state serialised right now. So we blat out the whole serialisation
+      if(RestoreDeferredContextState)
+      {
+        USE_SCRATCH_SERIALISER();
+        SCOPED_SERIALISE_CHUNK(D3D11Chunk::PostFinishCommandListSet);
+        SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+        Serialise_PostFinishCommandListSet(GET_SERIALISER, wrapped);
+        m_ContextRecord->AddChunk(scope.Get());
+      }
+    }
+    else    // IsIdleCapturing(m_State)
+    {
+      // mark that this command list is empty so that if we immediately try and capture
+      // we pick up on that.
+      m_EmptyCommandList = true;
+
+      // still need to propagate up dirty resources to the immediate context
+      wrapped->SwapDirtyResources(m_DeferredDirty);
+
+      // clear the references and decref the resource records
+      for(ResourceId id : m_DeferredReferences)
+      {
+        D3D11ResourceRecord *deferredRecord = m_pDevice->GetResourceManager()->GetResourceRecord(id);
+        if(deferredRecord)
+          deferredRecord->Delete(m_pDevice->GetResourceManager());
+      }
+
+      m_DeferredReferences.clear();
+
+      RDCDEBUG(
+          "Deferred Context %s not capturing at the moment, Produced unsuccessful command list %s.",
+          ToStr(GetResourceID()).c_str(), ToStr(wrapped->GetResourceID()).c_str());
+    }
+  }
+
+  if(!RestoreDeferredContextState)
+    m_CurrentPipelineState->Clear();
+
+  VerifyState();
+
+  if(ppCommandList)
+    *ppCommandList = wrapped;
+
+  return hr;
 }
 
-bool WrappedID3D11DeviceContext::Serialise_FinishCommandList(BOOL RestoreDeferredContextState_, ID3D11CommandList **ppCommandList)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_Flush(SerialiserType &ser)
 {
-	SERIALISE_ELEMENT(uint8_t, RestoreDeferredContextState, RestoreDeferredContextState_ == TRUE);
-	SERIALISE_ELEMENT(ResourceId, cmdList, GetIDForResource(*ppCommandList));
+  if(IsReplayingAndReading())
+  {
+    m_pRealContext->Flush();
+  }
 
-	if(m_State <= EXECUTING && GetType() == D3D11_DEVICE_CONTEXT_DEFERRED)
-	{
-		ID3D11CommandList *ret = NULL;
-		HRESULT hr = m_pRealContext->FinishCommandList(RestoreDeferredContextState, &ret);
-
-		if(!RestoreDeferredContextState)
-			m_CurrentPipelineState->Clear();
-
-		VerifyState();
-
-		if(FAILED(hr)) RDCERR("Failed on finishing command list, HRESULT: 0x%08x", hr);
-
-		RDCASSERT(SUCCEEDED(hr) && ret);
-		
-		ret = new WrappedID3D11CommandList(ret, m_pDevice, this, true);
-
-		if(ret)
-		{
-			m_pDevice->GetResourceManager()->AddLiveResource(cmdList, ret);
-		}
-	}
-
-	const string desc = m_pSerialiser->GetDebugStr();
-	
-	Serialise_DebugMessages();
-
-	if(m_State == READING)
-	{
-		AddEvent(FINISH_CMD_LIST, desc);
-		string name = "FinishCommandList() -> " + ToStr::Get(cmdList);
-
-		FetchDrawcall draw;
-		draw.name = name;
-		draw.flags |= eDraw_CmdList;
-
-		AddDrawcall(draw, true);
-
-		m_pDevice->GetImmediateContext()->m_CmdLists[cmdList] = m_ParentDrawcall;
-		m_ParentDrawcall.children.clear();
-	}
-
-	return true;
-}
-
-HRESULT WrappedID3D11DeviceContext::FinishCommandList(BOOL RestoreDeferredContextState, ID3D11CommandList **ppCommandList)
-{
-	if(GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE)
-	{
-		m_pDevice->AddDebugMessage(eDbgCategory_Execution, eDbgSeverity_High, eDbgSource_IncorrectAPIUse,
-			"It is invalid to call FinishCommandList on an immediate context. The call has been dropped from the capture.");
-		return DXGI_ERROR_INVALID_CALL;
-	}
-
-	DrainAnnotationQueue();
-
-	ID3D11CommandList *real = NULL;
-	HRESULT hr = m_pRealContext->FinishCommandList(RestoreDeferredContextState, &real);
-
-	RDCASSERT(GetType() == D3D11_DEVICE_CONTEXT_DEFERRED);
-
-	bool cmdListSuccessful = m_SuccessfulCapture;
-
-	if(m_State != WRITING_CAPFRAME && !m_EmptyCommandList)
-		cmdListSuccessful = false;
-
-	WrappedID3D11CommandList *wrapped = new WrappedID3D11CommandList(real, m_pDevice, this, cmdListSuccessful);
-	
-	if(m_State >= WRITING)
-	{
-		RDCASSERT(m_pDevice->GetResourceManager()->GetResourceRecord(wrapped->GetResourceID()) == NULL);
-
-		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->AddResourceRecord(wrapped->GetResourceID());
-		record->Length = 0;
-		record->ignoreSerialise = true;
-	}
-
-	// if we got here and m_SuccessfulCapture is on, we have captured everything in this command list
-	if(m_State == WRITING_CAPFRAME && m_SuccessfulCapture)
-	{
-		RDCDEBUG("Deferred Context %llu Finish()'d successfully! Got successful command list %llu", GetResourceID(), wrapped->GetResourceID());
-
-		RDCASSERT(wrapped->IsCaptured());
-		
-		ID3D11CommandList *w = wrapped;
-
-		SCOPED_SERIALISE_CONTEXT(FINISH_CMD_LIST);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_FinishCommandList(RestoreDeferredContextState, &w);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-
-		D3D11ResourceRecord *r = m_pDevice->GetResourceManager()->GetResourceRecord(wrapped->GetResourceID());
-		RDCASSERT(r);
-
-		m_ContextRecord->SwapChunks(r);
-	}
-	else if(m_State == WRITING_CAPFRAME && !m_SuccessfulCapture)
-	{
-		m_SuccessfulCapture = true;
-
-		RDCDEBUG("Deferred Context %llu wasn't successful, but now we've Finish()'d so it is! Produced unsuccessful command list %llu.",
-					GetResourceID(), wrapped->GetResourceID());
-
-		RDCASSERT(!wrapped->IsCaptured());
-
-		// need to clear out anything we had serialised before
-		m_ContextRecord->LockChunks();
-		while(m_ContextRecord->HasChunks())
-		{
-			Chunk *chunk = m_ContextRecord->GetLastChunk();
-			SAFE_DELETE(chunk);
-			m_ContextRecord->PopChunk();
-		}
-		m_ContextRecord->UnlockChunks();
-	}
-	else if(m_State >= WRITING)
-	{
-		// mark that this command list is empty so that if we immediately try and capture
-		// we pick up on that.
-		m_EmptyCommandList = true;
-		
-		RDCDEBUG("Deferred Context %llu not capturing at the moment, Produced unsuccessful command list %llu.",
-					GetResourceID(), wrapped->GetResourceID());
-	}
-
-	if(!RestoreDeferredContextState)
-		m_CurrentPipelineState->Clear();
-	VerifyState();
-
-	if (ppCommandList) *ppCommandList = wrapped;
-
-	return hr;
-}
-
-bool WrappedID3D11DeviceContext::Serialise_Flush()
-{
-	if(m_State <= EXECUTING)
-	{
-		m_pRealContext->Flush();
-	}
-
-	return true;
+  return true;
 }
 
 void WrappedID3D11DeviceContext::Flush()
 {
-	m_EmptyCommandList = false;
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(FLUSH);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_Flush();
-		
-		m_ContextRecord->AddChunk(scope.Get());
+  m_EmptyCommandList = false;
 
-		m_CurrentPipelineState->MarkReferenced(this, false);
-	}
-	else if(m_State == WRITING_IDLE)
-	{
-		m_CurrentPipelineState->MarkDirty(m_pDevice->GetResourceManager());
-	}
+  m_pDevice->FlushPendingDead();
 
-	m_pRealContext->Flush();
+  SERIALISE_TIME_CALL(m_pRealContext->Flush());
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::Flush);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_Flush(GET_SERIALISER);
+
+    m_ContextRecord->AddChunk(scope.Get());
+
+    m_CurrentPipelineState->MarkReferenced(this, false);
+  }
 }
 
 #pragma endregion Execute
 
 #pragma region Copy
 
-bool WrappedID3D11DeviceContext::Serialise_CopySubresourceRegion( ID3D11Resource *pDstResource, UINT DstSubresource,
-												UINT DstX, UINT DstY, UINT DstZ,
-												ID3D11Resource *pSrcResource, UINT SrcSubresource, const D3D11_BOX *pSrcBox)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_CopySubresourceRegion(
+    SerialiserType &ser, ID3D11Resource *pDstResource, UINT DstSubresource, UINT DstX, UINT DstY,
+    UINT DstZ, ID3D11Resource *pSrcResource, UINT SrcSubresource, const D3D11_BOX *pSrcBox)
 {
-	SERIALISE_ELEMENT(ResourceId, Destination, GetIDForResource(pDstResource));
-	SERIALISE_ELEMENT(uint32_t, DestSubresource, DstSubresource);
-	SERIALISE_ELEMENT(uint32_t, DestX, DstX);
-	SERIALISE_ELEMENT(uint32_t, DestY, DstY);
-	SERIALISE_ELEMENT(uint32_t, DestZ, DstZ);
-	SERIALISE_ELEMENT(ResourceId, Source, GetIDForResource(pSrcResource));
-	SERIALISE_ELEMENT(uint32_t, SourceSubresource, SrcSubresource);
-	SERIALISE_ELEMENT(uint8_t, HasSourceBox, pSrcBox != NULL);
-	SERIALISE_ELEMENT_OPT(D3D11_BOX, SourceBox, *pSrcBox, HasSourceBox);
+  SERIALISE_ELEMENT(pDstResource);
+  SERIALISE_ELEMENT(DstSubresource);
+  SERIALISE_ELEMENT(DstX);
+  SERIALISE_ELEMENT(DstY);
+  SERIALISE_ELEMENT(DstZ);
+  SERIALISE_ELEMENT(pSrcResource);
+  SERIALISE_ELEMENT(SrcSubresource);
+  SERIALISE_ELEMENT_OPT(pSrcBox);
 
-	if(m_State <= EXECUTING &&
-		 m_pDevice->GetResourceManager()->HasLiveResource(Destination) &&
-		 m_pDevice->GetResourceManager()->HasLiveResource(Source))
-	{
-		D3D11_BOX *box = &SourceBox;
-		if(!HasSourceBox)
-			box = NULL;
+  Serialise_DebugMessages(GET_SERIALISER);
 
-		m_pRealContext->CopySubresourceRegion(m_pDevice->GetResourceManager()->UnwrapResource((ID3D11Resource *)m_pDevice->GetResourceManager()->GetLiveResource(Destination)),
-													DestSubresource, DestX, DestY, DestZ,
-													m_pDevice->GetResourceManager()->UnwrapResource((ID3D11Resource *)m_pDevice->GetResourceManager()->GetLiveResource(Source)),
-													SourceSubresource, box);
-	}
+  SERIALISE_CHECK_READ_ERRORS();
 
-	const string desc = m_pSerialiser->GetDebugStr();
+  if(IsReplayingAndReading())
+  {
+    if(pDstResource && pSrcResource)
+    {
+      m_pRealContext->CopySubresourceRegion(UnwrapResource(pDstResource), DstSubresource, DstX,
+                                            DstY, DstZ, UnwrapResource(pSrcResource),
+                                            SrcSubresource, pSrcBox);
+    }
 
-	// version 5 added this as a drawcall, we can assume for older logs there's just no debug messages
-	if(m_pDevice->GetLogVersion() >= 0x000006)
-		Serialise_DebugMessages();
+    if(IsLoading(m_State))
+    {
+      ResourceId dstLiveID = GetIDForDeviceChild(pDstResource);
+      ResourceId srcLiveID = GetIDForDeviceChild(pSrcResource);
+      ResourceId dstOrigID = GetResourceManager()->GetOriginalID(dstLiveID);
+      ResourceId srcOrigID = GetResourceManager()->GetOriginalID(srcLiveID);
 
-	if(m_State == READING)
-	{
-		std::string dstName = GetDebugName(m_pDevice->GetResourceManager()->GetLiveResource(Destination));
-		std::string srcName = GetDebugName(m_pDevice->GetResourceManager()->GetLiveResource(Source));
+      AddEvent();
 
-		if(dstName == "") dstName = ToStr::Get(Destination);
-		if(srcName == "") srcName = ToStr::Get(Source);
+      DrawcallDescription draw;
+      draw.name = "CopySubresourceRegion(" + ToStr(dstOrigID) + ", " + ToStr(srcOrigID) + ")";
+      draw.flags |= DrawFlags::Copy;
 
-		AddEvent(COPY_SUBRESOURCE_REGION, desc);
-		string name = "CopySubresourceRegion(" + dstName + ", " + srcName + ")";
+      if(pDstResource && pSrcResource)
+      {
+        draw.copySource = srcOrigID;
+        draw.copySourceSubresource =
+            Subresource(GetMipForSubresource(pSrcResource, SrcSubresource),
+                        GetSliceForSubresource(pSrcResource, SrcSubresource));
 
-		FetchDrawcall draw;
-		draw.name = name;
-		draw.flags |= eDraw_Copy;
+        draw.copyDestination = dstOrigID;
+        draw.copyDestinationSubresource =
+            Subresource(GetMipForSubresource(pDstResource, DstSubresource),
+                        GetSliceForSubresource(pDstResource, DstSubresource));
 
-		if(m_pDevice->GetResourceManager()->HasLiveResource(Destination) &&
-			m_pDevice->GetResourceManager()->HasLiveResource(Source))
-		{
-			draw.copySource = Source;
-			draw.copyDestination = Destination;
+        if(m_CurEventID)
+        {
+          if(dstLiveID == srcLiveID)
+          {
+            m_ResourceUses[dstLiveID].push_back(EventUsage(m_CurEventID, ResourceUsage::Copy));
+          }
+          else
+          {
+            m_ResourceUses[dstLiveID].push_back(EventUsage(m_CurEventID, ResourceUsage::CopyDst));
+            m_ResourceUses[srcLiveID].push_back(EventUsage(m_CurEventID, ResourceUsage::CopySrc));
+          }
+        }
+      }
 
-			if(Destination == Source)
-			{
-				m_ResourceUses[m_pDevice->GetResourceManager()->GetLiveID(Destination)].push_back(EventUsage(m_CurEventID, eUsage_Copy));
-			}
-			else
-			{
-				m_ResourceUses[m_pDevice->GetResourceManager()->GetLiveID(Destination)].push_back(EventUsage(m_CurEventID, eUsage_CopyDst));
-				m_ResourceUses[m_pDevice->GetResourceManager()->GetLiveID(Source)].push_back(EventUsage(m_CurEventID, eUsage_CopySrc));
-			}
-		}
+      AddDrawcall(draw, true);
+    }
+  }
 
-		AddDrawcall(draw, true);
-	}
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::CopySubresourceRegion( ID3D11Resource *pDstResource, UINT DstSubresource,
-												UINT DstX, UINT DstY, UINT DstZ,
-												ID3D11Resource *pSrcResource, UINT SrcSubresource, const D3D11_BOX *pSrcBox)
+void WrappedID3D11DeviceContext::CopySubresourceRegion(ID3D11Resource *pDstResource,
+                                                       UINT DstSubresource, UINT DstX, UINT DstY,
+                                                       UINT DstZ, ID3D11Resource *pSrcResource,
+                                                       UINT SrcSubresource, const D3D11_BOX *pSrcBox)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(COPY_SUBRESOURCE_REGION);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_CopySubresourceRegion(pDstResource, DstSubresource, DstX, DstY, DstZ, pSrcResource, SrcSubresource, pSrcBox);
-		
-		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pDstResource));
-		RDCASSERT(record);
-		D3D11ResourceRecord *srcRecord = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pSrcResource));
-		RDCASSERT(srcRecord);
-		record->AddParent(srcRecord);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-		
-		m_MissingTracks.insert(GetIDForResource(pDstResource));
-		// assume partial update
-		MarkResourceReferenced(GetIDForResource(pDstResource), eFrameRef_Read);
-		MarkResourceReferenced(GetIDForResource(pDstResource), eFrameRef_Write);
-		MarkResourceReferenced(GetIDForResource(pSrcResource), eFrameRef_Read);
-	}
-	else if(m_State >= WRITING)
-	{
-		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pDstResource));
-		RDCASSERT(record);
+  m_EmptyCommandList = false;
 
-		D3D11ResourceRecord *srcRecord = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pSrcResource));
-		RDCASSERT(srcRecord);
+  SERIALISE_TIME_CALL(m_pRealContext->CopySubresourceRegion(
+      UnwrapResource(pDstResource), DstSubresource, DstX, DstY, DstZ, UnwrapResource(pSrcResource),
+      SrcSubresource, pSrcBox));
 
-		if(m_pDevice->GetResourceManager()->IsResourceDirty(GetIDForResource(pSrcResource)))
-		{
-			m_pDevice->GetResourceManager()->MarkDirtyResource(GetIDForResource(pDstResource));
-		}
-		else if(WrappedID3D11Buffer::IsAlloc(pDstResource) && WrappedID3D11Buffer::IsAlloc(pSrcResource))
-		{
-			// perform copy manually (since we have buffer contents locally)
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::CopySubresourceRegion);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_CopySubresourceRegion(GET_SERIALISER, pDstResource, DstSubresource, DstX, DstY, DstZ,
+                                    pSrcResource, SrcSubresource, pSrcBox);
 
-			RDCASSERT(record->DataInSerialiser);
-			RDCASSERT(srcRecord->DataInSerialiser);
+    D3D11ResourceRecord *record =
+        m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForDeviceChild(pDstResource));
+    RDCASSERT(record);
+    D3D11ResourceRecord *srcRecord =
+        m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForDeviceChild(pSrcResource));
+    RDCASSERT(srcRecord);
+    record->AddParent(srcRecord);
 
-			byte *from = srcRecord->GetDataPtr();
-			byte *to = record->GetDataPtr();
+    m_ContextRecord->AddChunk(scope.Get());
 
-			to += DstX;
+    MarkDirtyResource(GetIDForDeviceChild(pDstResource));
 
-			size_t length = (size_t)srcRecord->Length;
+    // assume partial update
+    MarkResourceReferenced(GetIDForDeviceChild(pDstResource), eFrameRef_Read);
+    MarkResourceReferenced(GetIDForDeviceChild(pDstResource), eFrameRef_PartialWrite);
+    MarkResourceReferenced(GetIDForDeviceChild(pSrcResource), eFrameRef_Read);
+  }
+  else if(IsBackgroundCapturing(m_State))
+  {
+    D3D11ResourceRecord *record =
+        m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForDeviceChild(pDstResource));
+    RDCASSERT(record);
 
-			if(pSrcBox)
-			{
-				from += pSrcBox->left;
-				length = pSrcBox->right - pSrcBox->left;
-			}
+    D3D11ResourceRecord *srcRecord =
+        m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForDeviceChild(pSrcResource));
+    RDCASSERT(srcRecord);
 
-			if(length > 0)
-			{
-				memcpy(to, from, length);
-			}
-		}
-		else
-		{
-			// GPU dirty. Just let initial state handle this.
-			
-			m_pDevice->GetResourceManager()->MarkDirtyResource(GetIDForResource(pDstResource));
-		}
-	}
+    D3D11_RESOURCE_DIMENSION srcDim, dstDim;
+    pDstResource->GetType(&dstDim);
+    pSrcResource->GetType(&srcDim);
 
-	m_pRealContext->CopySubresourceRegion(m_pDevice->GetResourceManager()->UnwrapResource(pDstResource), DstSubresource, DstX, DstY, DstZ,
-												m_pDevice->GetResourceManager()->UnwrapResource(pSrcResource), SrcSubresource, pSrcBox);
+    if(m_pDevice->GetResourceManager()->IsResourceDirty(GetIDForDeviceChild(pSrcResource)))
+    {
+      MarkDirtyResource(GetIDForDeviceChild(pDstResource));
+    }
+    else if(srcDim == D3D11_RESOURCE_DIMENSION_BUFFER && dstDim == D3D11_RESOURCE_DIMENSION_BUFFER)
+    {
+      // perform copy manually (since we have buffer contents locally)
+
+      RDCASSERT(record->DataInSerialiser);
+      RDCASSERT(srcRecord->DataInSerialiser);
+
+      byte *from = srcRecord->GetDataPtr();
+      byte *to = record->GetDataPtr();
+
+      to += DstX;
+
+      size_t length = (size_t)srcRecord->Length;
+
+      if(pSrcBox)
+      {
+        from += pSrcBox->left;
+        length = pSrcBox->right - pSrcBox->left;
+      }
+
+      if(length > 0)
+      {
+        memcpy(to, from, length);
+      }
+    }
+    else
+    {
+      // GPU dirty. Just let initial state handle this.
+
+      MarkDirtyResource(GetIDForDeviceChild(pDstResource));
+    }
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_CopyResource(ID3D11Resource *pDstResource, ID3D11Resource *pSrcResource)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_CopyResource(SerialiserType &ser,
+                                                        ID3D11Resource *pDstResource,
+                                                        ID3D11Resource *pSrcResource)
 {
-	SERIALISE_ELEMENT(ResourceId, Destination, GetIDForResource(pDstResource));
-	SERIALISE_ELEMENT(ResourceId, Source, GetIDForResource(pSrcResource));
+  SERIALISE_ELEMENT(pDstResource);
+  SERIALISE_ELEMENT(pSrcResource);
 
-	if(m_State <= EXECUTING &&
-		 m_pDevice->GetResourceManager()->HasLiveResource(Destination) &&
-		 m_pDevice->GetResourceManager()->HasLiveResource(Source))
-	{
-		m_pRealContext->CopyResource(m_pDevice->GetResourceManager()->UnwrapResource((ID3D11Resource*)m_pDevice->GetResourceManager()->GetLiveResource(Destination)),
-											m_pDevice->GetResourceManager()->UnwrapResource((ID3D11Resource*)m_pDevice->GetResourceManager()->GetLiveResource(Source)));
-	}
+  Serialise_DebugMessages(GET_SERIALISER);
 
-	const string desc = m_pSerialiser->GetDebugStr();
+  SERIALISE_CHECK_READ_ERRORS();
 
-	// version 5 added this as a drawcall, we can assume for older logs there's just no debug messages
-	if(m_pDevice->GetLogVersion() >= 0x000006)
-		Serialise_DebugMessages();
+  if(IsReplayingAndReading())
+  {
+    if(pDstResource && pSrcResource)
+    {
+      m_pRealContext->CopyResource(UnwrapResource(pDstResource), UnwrapResource(pSrcResource));
+    }
 
-	if(m_State == READING)
-	{
-		std::string dstName = GetDebugName(m_pDevice->GetResourceManager()->GetLiveResource(Destination));
-		std::string srcName = GetDebugName(m_pDevice->GetResourceManager()->GetLiveResource(Source));
+    if(IsLoading(m_State))
+    {
+      ResourceId dstLiveID = GetIDForDeviceChild(pDstResource);
+      ResourceId srcLiveID = GetIDForDeviceChild(pSrcResource);
+      ResourceId dstOrigID = GetResourceManager()->GetOriginalID(dstLiveID);
+      ResourceId srcOrigID = GetResourceManager()->GetOriginalID(srcLiveID);
 
-		if(dstName == "") dstName = ToStr::Get(Destination);
-		if(srcName == "") srcName = ToStr::Get(Source);
+      AddEvent();
 
-		AddEvent(COPY_RESOURCE, desc);
-		string name = "CopyResource(" + dstName + ", " + srcName + ")";
+      DrawcallDescription draw;
+      draw.name = "CopyResource(" + ToStr(dstOrigID) + ", " + ToStr(srcOrigID) + ")";
+      draw.flags |= DrawFlags::Copy;
 
-		FetchDrawcall draw;
-		draw.name = name;
-		draw.flags |= eDraw_Copy;
+      if(pDstResource && pSrcResource)
+      {
+        draw.copySource = srcOrigID;
+        draw.copySourceSubresource = Subresource();
+        draw.copyDestination = dstOrigID;
+        draw.copyDestinationSubresource = Subresource();
 
-		if(m_pDevice->GetResourceManager()->HasLiveResource(Destination) &&
-			m_pDevice->GetResourceManager()->HasLiveResource(Source))
-		{
-			draw.copySource = Source;
-			draw.copyDestination = Destination;
+        if(m_CurEventID)
+        {
+          if(dstLiveID == srcLiveID)
+          {
+            m_ResourceUses[dstLiveID].push_back(EventUsage(m_CurEventID, ResourceUsage::Copy));
+          }
+          else
+          {
+            m_ResourceUses[dstLiveID].push_back(EventUsage(m_CurEventID, ResourceUsage::CopyDst));
+            m_ResourceUses[srcLiveID].push_back(EventUsage(m_CurEventID, ResourceUsage::CopySrc));
+          }
+        }
+      }
 
-			if(Destination == Source)
-			{
-				m_ResourceUses[m_pDevice->GetResourceManager()->GetLiveID(Destination)].push_back(EventUsage(m_CurEventID, eUsage_Copy));
-			}
-			else
-			{
-				m_ResourceUses[m_pDevice->GetResourceManager()->GetLiveID(Destination)].push_back(EventUsage(m_CurEventID, eUsage_CopyDst));
-				m_ResourceUses[m_pDevice->GetResourceManager()->GetLiveID(Source)].push_back(EventUsage(m_CurEventID, eUsage_CopySrc));
-			}
-		}
+      AddDrawcall(draw, true);
+    }
+  }
 
-		AddDrawcall(draw, true);
-	}
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::CopyResource(ID3D11Resource *pDstResource, ID3D11Resource *pSrcResource)
+void WrappedID3D11DeviceContext::CopyResource(ID3D11Resource *pDstResource,
+                                              ID3D11Resource *pSrcResource)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(COPY_RESOURCE);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_CopyResource(pDstResource, pSrcResource);
-		
-		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pDstResource));
-		RDCASSERT(record);
-		D3D11ResourceRecord *srcRecord = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pSrcResource));
-		RDCASSERT(srcRecord);
-		record->AddParent(srcRecord);
+  m_EmptyCommandList = false;
 
-		m_ContextRecord->AddChunk(scope.Get());
-		
-		m_MissingTracks.insert(GetIDForResource(pDstResource));
-		MarkResourceReferenced(GetIDForResource(pDstResource), eFrameRef_Write);
-		MarkResourceReferenced(GetIDForResource(pSrcResource), eFrameRef_Read);
-	}
-	else if(m_State >= WRITING)
-	{
-		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pDstResource));
-		RDCASSERT(record);
+  SERIALISE_TIME_CALL(
+      m_pRealContext->CopyResource(UnwrapResource(pDstResource), UnwrapResource(pSrcResource)));
 
-		D3D11ResourceRecord *srcRecord = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pSrcResource));
-		RDCASSERT(srcRecord);
-		
-		if(m_pDevice->GetResourceManager()->IsResourceDirty(GetIDForResource(pSrcResource)))
-		{
-			m_pDevice->GetResourceManager()->MarkDirtyResource(GetIDForResource(pDstResource));
-		}
-		else if(WrappedID3D11Buffer::IsAlloc(pDstResource) && WrappedID3D11Buffer::IsAlloc(pSrcResource))
-		{
-			// perform copy manually (since we have buffer contents locally)
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::CopyResource);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_CopyResource(GET_SERIALISER, pDstResource, pSrcResource);
 
-			RDCASSERT(record->DataInSerialiser);
-			RDCASSERT(srcRecord->DataInSerialiser);
-			
-			byte *from = srcRecord->GetDataPtr();
-			byte *to = record->GetDataPtr();
+    D3D11ResourceRecord *record =
+        m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForDeviceChild(pDstResource));
+    RDCASSERT(record);
+    D3D11ResourceRecord *srcRecord =
+        m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForDeviceChild(pSrcResource));
+    RDCASSERT(srcRecord);
+    record->AddParent(srcRecord);
 
-			memcpy(to, from, (size_t)record->Length);
-		}
-		else if(
-			(WrappedID3D11Texture1D::IsAlloc(pDstResource) && WrappedID3D11Texture1D::IsAlloc(pSrcResource)) ||
-			(WrappedID3D11Texture2D::IsAlloc(pDstResource) && WrappedID3D11Texture2D::IsAlloc(pSrcResource)) ||
-			(WrappedID3D11Texture3D::IsAlloc(pDstResource) && WrappedID3D11Texture3D::IsAlloc(pSrcResource))
-		  )
-		{
-			bool copied = false;
+    m_ContextRecord->AddChunk(scope.Get());
 
-			// can't copy without data allocated
-			if(!record->DataInSerialiser || !srcRecord->DataInSerialiser)
-			{
-				SCOPED_SERIALISE_CONTEXT(COPY_RESOURCE);
-				m_pSerialiser->Serialise("context", m_ResourceID);	
-				Serialise_CopyResource(pDstResource, pSrcResource);
+    MarkDirtyResource(GetIDForDeviceChild(pDstResource));
 
-				record->LockChunks();
-				while(true)
-				{
-					Chunk *end = record->GetLastChunk();
+    MarkResourceReferenced(GetIDForDeviceChild(pDstResource), eFrameRef_PartialWrite);
+    MarkResourceReferenced(GetIDForDeviceChild(pSrcResource), eFrameRef_Read);
+  }
+  else if(IsBackgroundCapturing(m_State))
+  {
+    D3D11ResourceRecord *record =
+        m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForDeviceChild(pDstResource));
+    RDCASSERT(record);
 
-					if(end->GetChunkType() == CLEAR_RTV ||
-						end->GetChunkType() == CLEAR_DSV ||
-						end->GetChunkType() == CLEAR_UAV_FLOAT ||
-						end->GetChunkType() == CLEAR_UAV_INT ||
-						end->GetChunkType() == RESOLVE_SUBRESOURCE ||
-						end->GetChunkType() == COPY_RESOURCE)
-					{
-						SAFE_DELETE(end);
+    D3D11ResourceRecord *srcRecord =
+        m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForDeviceChild(pSrcResource));
+    RDCASSERT(srcRecord);
 
-						record->PopChunk();
+    record->UpdateCount++;
 
-						continue;
-					}
+    D3D11_RESOURCE_DIMENSION srcDim, dstDim;
+    pDstResource->GetType(&dstDim);
+    pSrcResource->GetType(&srcDim);
 
-					break;
-				}
-				record->UnlockChunks();
+    if(record->UpdateCount > 5 ||
+       m_pDevice->GetResourceManager()->IsResourceDirty(GetIDForDeviceChild(pSrcResource)))
+    {
+      MarkDirtyResource(GetIDForDeviceChild(pDstResource));
+    }
+    else if(srcDim == D3D11_RESOURCE_DIMENSION_BUFFER && dstDim == D3D11_RESOURCE_DIMENSION_BUFFER)
+    {
+      // perform copy manually (since we have buffer contents locally)
 
-				record->AddChunk(scope.Get());
-				record->AddParent(srcRecord);
-			}
-			else
-			{
-				RDCASSERT(record->NumSubResources == srcRecord->NumSubResources);
+      RDCASSERT(record->DataInSerialiser);
+      RDCASSERT(srcRecord->DataInSerialiser);
 
-				for(int i=0; i < record->NumSubResources; i++)
-				{
-					byte *from = srcRecord->SubResources[i]->GetDataPtr();
-					byte *to = record->SubResources[i]->GetDataPtr();
+      byte *from = srcRecord->GetDataPtr();
+      byte *to = record->GetDataPtr();
 
-					memcpy(to, from, (size_t)record->SubResources[i]->Length);
-				}
-			}
-		}
-		else
-		{
-			RDCERR("Unexpected resource type");
-		}
-	}
+      memcpy(to, from, (size_t)record->Length);
+    }
+    else if(srcDim != D3D11_RESOURCE_DIMENSION_BUFFER && dstDim != D3D11_RESOURCE_DIMENSION_BUFFER)
+    {
+      if(record->DataInSerialiser && srcRecord->DataInSerialiser)
+      {
+        RDCASSERT(record->NumSubResources == srcRecord->NumSubResources);
 
-	m_pRealContext->CopyResource(m_pDevice->GetResourceManager()->UnwrapResource(pDstResource), m_pDevice->GetResourceManager()->UnwrapResource(pSrcResource));
+        for(int i = 0; i < record->NumSubResources; i++)
+        {
+          byte *from = srcRecord->SubResources[i]->GetDataPtr();
+          byte *to = record->SubResources[i]->GetDataPtr();
+
+          memcpy(to, from, (size_t)record->SubResources[i]->Length);
+        }
+      }
+      else
+      {
+        // can't copy without data allocated
+        USE_SCRATCH_SERIALISER();
+        SCOPED_SERIALISE_CHUNK(D3D11Chunk::CopyResource);
+        SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+        Serialise_CopyResource(GET_SERIALISER, pDstResource, pSrcResource);
+
+        record->AddChunk(scope.Get());
+        record->AddParent(srcRecord);
+      }
+    }
+    else
+    {
+      RDCERR("Unexpected resource type");
+    }
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_UpdateSubresource(ID3D11Resource *pDstResource, UINT DstSubresource, const D3D11_BOX *pDstBox,
-																const void *pSrcData, UINT SrcRowPitch, UINT SrcDepthPitch)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_UpdateSubresource(
+    SerialiserType &ser, ID3D11Resource *pDstResource, UINT DstSubresource,
+    const D3D11_BOX *pDstBox, const void *pSrcData, UINT SrcRowPitch, UINT SrcDepthPitch)
 {
-	return Serialise_UpdateSubresource1(pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch, SrcDepthPitch, 0);
+  // pass ~0U as the flags to indicate this came for UpdateSubresource, so we know to apply
+  // deferred context workarounds or not
+  return Serialise_UpdateSubresource1(ser, pDstResource, DstSubresource, pDstBox, pSrcData,
+                                      SrcRowPitch, SrcDepthPitch, ~0U);
 }
 
-void WrappedID3D11DeviceContext::UpdateSubresource(ID3D11Resource *pDstResource, UINT DstSubresource, const D3D11_BOX *pDstBox,
-												const void *pSrcData, UINT SrcRowPitch, UINT SrcDepthPitch)
+void WrappedID3D11DeviceContext::UpdateSubresource(ID3D11Resource *pDstResource, UINT DstSubresource,
+                                                   const D3D11_BOX *pDstBox, const void *pSrcData,
+                                                   UINT SrcRowPitch, UINT SrcDepthPitch)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(UPDATE_SUBRESOURCE);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_UpdateSubresource(pDstResource, DstSubresource, pDstBox,
-									pSrcData, SrcRowPitch, SrcDepthPitch);
-		
-		m_MissingTracks.insert(GetIDForResource(pDstResource));
+  m_EmptyCommandList = false;
 
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	else if(m_State >= WRITING)
-	{
-		ResourceId idx = GetIDForResource(pDstResource);
-		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(idx);
-		RDCASSERT(record);
+  SERIALISE_TIME_CALL(m_pRealContext->UpdateSubresource(
+      UnwrapResource(pDstResource), DstSubresource, pDstBox, pSrcData, SrcRowPitch, SrcDepthPitch));
 
-		// buffers MUST update the whole resource, and don't have any subresources,
-		// so this effectively becomes just a map/unmap pair.
-		if(WrappedID3D11Buffer::IsAlloc(pDstResource))
-		{
-			RDCASSERT(record->NumSubResources == 0);
+  if(pDstBox && m_NeedUpdateSubWorkaround && GetType() == D3D11_DEVICE_CONTEXT_DEFERRED)
+  {
+    // we need to apply the *inverse* of the workaround, which matches the broken D3D behaviour
+    // so that we end up pointing at the expected data.
 
-			size_t offs = 0;
-			size_t length = (size_t)record->Length;
-			if(pDstBox)
-			{
-				offs += pDstBox->left;
-				length = RDCMIN((uint32_t)length, pDstBox->right - pDstBox->left);
-			}
+    D3D11_BOX alignedBox = *pDstBox;
 
-			RDCASSERT(record->DataInSerialiser);
-			
-			void *ptr = record->GetDataPtr()+offs;
+    DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
 
-			memcpy(ptr, pSrcData, length);
-		}
-		else if(WrappedID3D11Texture1D::IsAlloc(pDstResource) ||
-				WrappedID3D11Texture2D::IsAlloc(pDstResource) ||
-				WrappedID3D11Texture3D::IsAlloc(pDstResource))
-		{
-			RDCASSERT(record->Length == 1 && record->NumSubResources > 0);
+    D3D11_RESOURCE_DIMENSION dstDim;
+    pDstResource->GetType(&dstDim);
 
-			if(DstSubresource >= (UINT)record->NumSubResources)
-			{
-				RDCERR("DstSubresource %u >= %u (num subresources)", DstSubresource, record->NumSubResources);
-				return;
-			}
-			
-			// this record isn't in the log already, write out a chunk that we can update after.
-			if(!record->SubResources[DstSubresource]->DataInSerialiser)
-			{
-				SCOPED_SERIALISE_CONTEXT(UPDATE_SUBRESOURCE);
-				m_pSerialiser->Serialise("context", m_ResourceID);	
-				
-				Serialise_UpdateSubresource(pDstResource, DstSubresource, pDstBox,
-											pSrcData, SrcRowPitch, SrcDepthPitch);
+    if(dstDim == D3D11_RESOURCE_DIMENSION_TEXTURE1D)
+    {
+      D3D11_TEXTURE1D_DESC desc;
+      ((WrappedID3D11Texture1D *)pDstResource)->GetDesc(&desc);
+      fmt = desc.Format;
+    }
+    else if(dstDim == D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+    {
+      D3D11_TEXTURE2D_DESC desc;
+      ((WrappedID3D11Texture2D1 *)pDstResource)->GetDesc(&desc);
+      fmt = desc.Format;
+    }
+    else if(dstDim == D3D11_RESOURCE_DIMENSION_TEXTURE3D)
+    {
+      D3D11_TEXTURE3D_DESC desc;
+      ((WrappedID3D11Texture3D1 *)pDstResource)->GetDesc(&desc);
+      fmt = desc.Format;
+    }
 
-				Chunk *chunk = scope.Get();
+    // convert from pixels to blocks
+    if(IsBlockFormat(fmt))
+    {
+      alignedBox.left /= 4;
+      alignedBox.right /= 4;
+      alignedBox.top /= 4;
+      alignedBox.bottom /= 4;
+    }
 
-				record->AddChunk(chunk);
-				record->SubResources[DstSubresource]->SetDataPtr(chunk->GetData());
-				
-				record->SubResources[DstSubresource]->DataInSerialiser = true;
-			}
+    // if we couldn't get a format it's a buffer, so work in bytes
+    if(fmt != DXGI_FORMAT_UNKNOWN)
+      pSrcData = ((const BYTE *)pSrcData) + (alignedBox.front * SrcDepthPitch) +
+                 (alignedBox.top * SrcRowPitch) + (alignedBox.left * GetByteSize(1, 1, 1, fmt, 0));
+    else
+      pSrcData = ((const BYTE *)pSrcData) + (alignedBox.left);
+  }
 
-			{
-				RDCASSERT(record->SubResources[DstSubresource]->DataInSerialiser);
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::UpdateSubresource);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_UpdateSubresource(GET_SERIALISER, pDstResource, DstSubresource, pDstBox, pSrcData,
+                                SrcRowPitch, SrcDepthPitch);
 
-				void *ptr = record->SubResources[DstSubresource]->GetDataPtr();
-				
-				// if the box is empty, we don't have to do anything! hooray!
-				if(pDstBox &&
-					(pDstBox->back == pDstBox->front ||
-					pDstBox->left == pDstBox->right ||
-					pDstBox->top == pDstBox->bottom)
-					)
-				{
-					// empty, do nothing.
-				}
-				else
-				{
-					WrappedID3D11Texture1D *tex1 = WrappedID3D11Texture1D::IsAlloc(pDstResource) ? (WrappedID3D11Texture1D *)pDstResource : NULL;
-					WrappedID3D11Texture2D *tex2 = WrappedID3D11Texture2D::IsAlloc(pDstResource) ? (WrappedID3D11Texture2D *)pDstResource : NULL;
-					WrappedID3D11Texture3D *tex3 = WrappedID3D11Texture3D::IsAlloc(pDstResource) ? (WrappedID3D11Texture3D *)pDstResource : NULL;
+    MarkResourceReferenced(GetIDForDeviceChild(pDstResource), eFrameRef_PartialWrite);
 
-					RDCASSERT(tex1 || tex2 || tex3);
+    MarkDirtyResource(GetIDForDeviceChild(pDstResource));
 
-					DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
-					UINT subWidth = 1;
-					UINT subHeight = 1;
-					UINT subDepth = 1;
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+  else if(IsBackgroundCapturing(m_State))
+  {
+    ResourceId idx = GetIDForDeviceChild(pDstResource);
+    D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(idx);
+    RDCASSERT(record);
 
-					UINT mipLevel = GetMipForSubresource(pDstResource, DstSubresource);
-					
-					if(tex1)
-					{
-						D3D11_TEXTURE1D_DESC desc = {0};
-						tex1->GetDesc(&desc);
-						fmt = desc.Format;
-						subWidth = RDCMAX(1U, desc.Width>>mipLevel);
-					}
-					else if(tex2)
-					{
-						D3D11_TEXTURE2D_DESC desc = {0};
-						tex2->GetDesc(&desc);
-						fmt = desc.Format;
-						subWidth = RDCMAX(1U, desc.Width>>mipLevel);
-						subHeight = RDCMAX(1U, desc.Height>>mipLevel);
-					}
-					else if(tex3)
-					{
-						D3D11_TEXTURE3D_DESC desc = {0};
-						tex3->GetDesc(&desc);
-						fmt = desc.Format;
-						subWidth = RDCMAX(1U, desc.Width>>mipLevel);
-						subHeight = RDCMAX(1U, desc.Height>>mipLevel);
-						subDepth = RDCMAX(1U, desc.Depth>>mipLevel);
-					}
-					
-					UINT boxWidth = pDstBox ? pDstBox->right - pDstBox->left : subWidth;
-					UINT boxHeight = pDstBox ? pDstBox->bottom - pDstBox->top : subHeight;
-					UINT boxDepth = pDstBox ? pDstBox->back - pDstBox->front : subDepth;
+    D3D11_RESOURCE_DIMENSION dstDim;
+    pDstResource->GetType(&dstDim);
 
-					UINT boxTop = pDstBox ? pDstBox->top : 0;
-					
-					UINT DstRowPitch = GetByteSize(subWidth, 1, 1, fmt, 0);
-					UINT DstBoxRowPitch = GetByteSize(boxWidth, 1, 1, fmt, 0);
-					UINT DstSlicePitch = GetByteSize(subWidth, subHeight, 1, fmt, 0);
+    // buffers MUST update the whole resource, and don't have any subresources,
+    // so this effectively becomes just a map/unmap pair.
+    if(dstDim == D3D11_RESOURCE_DIMENSION_BUFFER)
+    {
+      RDCASSERT(record->NumSubResources == 0);
 
-					// for block formats, rows are in blocks (so height is squished essentially)
-					if(IsBlockFormat(fmt))
-					{
-						subWidth = AlignUp4(subWidth);
-						subHeight = AlignUp4(RDCMAX(1U, subHeight/4));
-						boxHeight = RDCMAX(1U, boxHeight/4);
-						boxTop = RDCMAX(0U, boxTop/4);
-					}
+      size_t offs = 0;
+      size_t length = (size_t)record->Length;
+      if(pDstBox)
+      {
+        offs += pDstBox->left;
+        length = RDCMIN((uint32_t)length, pDstBox->right - pDstBox->left);
+      }
 
-					RDCASSERT(boxWidth <= subWidth &&
-							 boxHeight <= subHeight &&
-							 boxDepth <= subDepth);
+      RDCASSERT(record->DataInSerialiser);
 
-					bool totalUpdate = false;
-					
-					// if there is no box, it's a totalUpdate (boxwidth/height are equal by inspection from the initialisation above)
-					// if the box describes the whole subresource, it's a totalUpdate
-					if(boxWidth == subWidth && boxHeight == subHeight && boxDepth == subDepth)
-						totalUpdate = true;
-					
-					// fast path for a total update from a source of the same size
-					if(totalUpdate &&
-						(
-							(tex1 && (UINT)record->SubResources[DstSubresource]->Length == SrcRowPitch) || 
-							(tex2 && (UINT)record->SubResources[DstSubresource]->Length == SrcRowPitch*subHeight) || 
-							(tex3 && (UINT)record->SubResources[DstSubresource]->Length == SrcDepthPitch*subDepth)
-					    )
-					  )
-					{
-						memcpy(ptr, pSrcData, (size_t)record->SubResources[DstSubresource]->Length);
-					}
-					else
-					{
-						// need to fall back to copying row by row from the source
-						byte *dstBuf = (byte *)ptr;
-						byte *src = (byte *)pSrcData;
-						
-						// if we have a box, skip to the front of it
-						if(pDstBox)
-							dstBuf += DstSlicePitch*pDstBox->front;
+      void *ptr = record->GetDataPtr() + offs;
 
-						for(UINT slice=0; slice < boxDepth; slice++)
-						{
-							byte *slicedst = dstBuf;
-							byte *slicesrc = src;
+      memcpy(ptr, pSrcData, length);
+    }
+    else if(dstDim != D3D11_RESOURCE_DIMENSION_UNKNOWN)
+    {
+      RDCASSERT(record->Length == 1 && record->NumSubResources > 0);
 
-							// if we have a box, skip to the top of it
-							if(pDstBox)
-								slicedst += DstRowPitch*boxTop;
+      if(DstSubresource >= (UINT)record->NumSubResources)
+      {
+        RDCERR("DstSubresource %u >= %u (num subresources)", DstSubresource, record->NumSubResources);
+        return;
+      }
 
-							for(UINT row=0; row < boxHeight; row++)
-							{
-								byte *rowdst = slicedst;
+      // this record isn't in the log already, write out a chunk that we can update after.
+      if(!record->SubResources[DstSubresource]->DataInSerialiser)
+      {
+        USE_SCRATCH_SERIALISER();
+        SCOPED_SERIALISE_CHUNK(D3D11Chunk::UpdateSubresource);
+        SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
 
-								// if we have a box, skip to the left of it
-								if(pDstBox && pDstBox->left > 0)
-									rowdst += GetByteSize(pDstBox->left, 1, 1, fmt, 0);
+        Serialise_UpdateSubresource(GET_SERIALISER, pDstResource, DstSubresource, pDstBox, pSrcData,
+                                    SrcRowPitch, SrcDepthPitch);
 
-								memcpy(rowdst, slicesrc, DstBoxRowPitch);
+        Chunk *chunk = scope.Get();
 
-								slicedst += DstRowPitch;
-								slicesrc += SrcRowPitch;
-							}
+        record->AddChunk(chunk);
+        record->SubResources[DstSubresource]->SetDataPtr(chunk->GetData());
 
-							dstBuf += DstSlicePitch;
-							src += SrcDepthPitch;
-						}
-					}
-				}
-			}
-		}
-	}
+        record->SubResources[DstSubresource]->DataInSerialiser = true;
+      }
 
-	m_pRealContext->UpdateSubresource(m_pDevice->GetResourceManager()->UnwrapResource(pDstResource), DstSubresource, pDstBox,
-											pSrcData, SrcRowPitch, SrcDepthPitch);
+      {
+        RDCASSERT(record->SubResources[DstSubresource]->DataInSerialiser);
+
+        void *ptr = record->SubResources[DstSubresource]->GetDataPtr();
+
+        // if the box is empty, we don't have to do anything! hooray!
+        if(pDstBox && (pDstBox->back == pDstBox->front || pDstBox->left == pDstBox->right ||
+                       pDstBox->top == pDstBox->bottom))
+        {
+          // empty, do nothing.
+        }
+        else
+        {
+          WrappedID3D11Texture1D *tex1 = dstDim == D3D11_RESOURCE_DIMENSION_TEXTURE1D
+                                             ? (WrappedID3D11Texture1D *)pDstResource
+                                             : NULL;
+          WrappedID3D11Texture2D1 *tex2 = dstDim == D3D11_RESOURCE_DIMENSION_TEXTURE2D
+                                              ? (WrappedID3D11Texture2D1 *)pDstResource
+                                              : NULL;
+          WrappedID3D11Texture3D1 *tex3 = dstDim == D3D11_RESOURCE_DIMENSION_TEXTURE3D
+                                              ? (WrappedID3D11Texture3D1 *)pDstResource
+                                              : NULL;
+
+          RDCASSERT(tex1 || tex2 || tex3);
+
+          DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+          UINT subWidth = 1;
+          UINT subHeight = 1;
+          UINT subDepth = 1;
+
+          UINT mipLevel = GetMipForSubresource(pDstResource, DstSubresource);
+
+          if(tex1)
+          {
+            D3D11_TEXTURE1D_DESC desc = {0};
+            tex1->GetDesc(&desc);
+            fmt = desc.Format;
+            subWidth = RDCMAX(1U, desc.Width >> mipLevel);
+          }
+          else if(tex2)
+          {
+            D3D11_TEXTURE2D_DESC desc = {0};
+            tex2->GetDesc(&desc);
+            fmt = desc.Format;
+            subWidth = RDCMAX(1U, desc.Width >> mipLevel);
+            subHeight = RDCMAX(1U, desc.Height >> mipLevel);
+          }
+          else if(tex3)
+          {
+            D3D11_TEXTURE3D_DESC desc = {0};
+            tex3->GetDesc(&desc);
+            fmt = desc.Format;
+            subWidth = RDCMAX(1U, desc.Width >> mipLevel);
+            subHeight = RDCMAX(1U, desc.Height >> mipLevel);
+            subDepth = RDCMAX(1U, desc.Depth >> mipLevel);
+          }
+
+          UINT boxWidth = pDstBox ? pDstBox->right - pDstBox->left : subWidth;
+          UINT boxHeight = pDstBox ? pDstBox->bottom - pDstBox->top : subHeight;
+          UINT boxDepth = pDstBox ? pDstBox->back - pDstBox->front : subDepth;
+
+          UINT boxTop = pDstBox ? pDstBox->top : 0;
+
+          UINT DstRowPitch = GetRowPitch(subWidth, fmt, 0);
+          UINT DstBoxRowPitch = GetRowPitch(boxWidth, fmt, 0);
+          UINT DstSlicePitch = GetByteSize(subWidth, subHeight, 1, fmt, 0);
+
+          // for block formats, rows are in blocks (so height is squished essentially)
+          if(IsBlockFormat(fmt))
+          {
+            subWidth = AlignUp4(subWidth);
+            subHeight = AlignUp4(RDCMAX(1U, subHeight / 4));
+            boxHeight = RDCMAX(1U, boxHeight / 4);
+            boxTop = RDCMAX(0U, boxTop / 4);
+          }
+
+          RDCASSERT(boxWidth <= subWidth && boxHeight <= subHeight && boxDepth <= subDepth);
+
+          bool totalUpdate = false;
+
+          // if there is no box, it's a totalUpdate (boxwidth/height are equal by inspection from
+          // the initialisation above)
+          // if the box describes the whole subresource, it's a totalUpdate
+          if(boxWidth == subWidth && boxHeight == subHeight && boxDepth == subDepth)
+            totalUpdate = true;
+
+          // fast path for a total update from a source of the same size
+          if(totalUpdate &&
+             ((tex1 && (UINT)record->SubResources[DstSubresource]->Length == SrcRowPitch) ||
+              (tex2 && (UINT)record->SubResources[DstSubresource]->Length == SrcRowPitch * subHeight) ||
+              (tex3 && (UINT)record->SubResources[DstSubresource]->Length == SrcDepthPitch * subDepth)))
+          {
+            memcpy(ptr, pSrcData, (size_t)record->SubResources[DstSubresource]->Length);
+          }
+          else
+          {
+            // need to fall back to copying row by row from the source
+            byte *dstBuf = (byte *)ptr;
+            byte *src = (byte *)pSrcData;
+
+            // if we have a box, skip to the front of it
+            if(pDstBox)
+              dstBuf += DstSlicePitch * pDstBox->front;
+
+            for(UINT slice = 0; slice < boxDepth; slice++)
+            {
+              byte *slicedst = dstBuf;
+              byte *slicesrc = src;
+
+              // if we have a box, skip to the top of it
+              if(pDstBox)
+                slicedst += DstRowPitch * boxTop;
+
+              for(UINT row = 0; row < boxHeight; row++)
+              {
+                byte *rowdst = slicedst;
+
+                // if we have a box, skip to the left of it
+                if(pDstBox && pDstBox->left > 0)
+                  rowdst += GetByteSize(pDstBox->left, 1, 1, fmt, 0);
+
+                memcpy(rowdst, slicesrc, DstBoxRowPitch);
+
+                slicedst += DstRowPitch;
+                slicesrc += SrcRowPitch;
+              }
+
+              dstBuf += DstSlicePitch;
+              src += SrcDepthPitch;
+            }
+          }
+        }
+      }
+    }
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_CopyStructureCount(ID3D11Buffer *pDstBuffer, UINT DstAlignedByteOffset, ID3D11UnorderedAccessView *pSrcView)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_CopyStructureCount(SerialiserType &ser,
+                                                              ID3D11Buffer *pDstBuffer,
+                                                              UINT DstAlignedByteOffset,
+                                                              ID3D11UnorderedAccessView *pSrcView)
 {
-	SERIALISE_ELEMENT(ResourceId, DestBuffer, GetIDForResource(pDstBuffer));
-	SERIALISE_ELEMENT(uint32_t, DestAlignedByteOffset, DstAlignedByteOffset);
-	SERIALISE_ELEMENT(ResourceId, SourceView, GetIDForResource(pSrcView));
+  SERIALISE_ELEMENT(pDstBuffer);
+  SERIALISE_ELEMENT(DstAlignedByteOffset);
+  SERIALISE_ELEMENT(pSrcView);
 
-	if(m_State <= EXECUTING &&
-		 m_pDevice->GetResourceManager()->HasLiveResource(DestBuffer) &&
-		 m_pDevice->GetResourceManager()->HasLiveResource(SourceView))
-	{
-		m_pRealContext->CopyStructureCount(UNWRAP(WrappedID3D11Buffer, m_pDevice->GetResourceManager()->GetLiveResource(DestBuffer)),
-											DestAlignedByteOffset,
-											UNWRAP(WrappedID3D11UnorderedAccessView, m_pDevice->GetResourceManager()->GetLiveResource(SourceView)));
-	}
+  SERIALISE_CHECK_READ_ERRORS();
 
-	return true;
+  if(IsReplayingAndReading() && pDstBuffer && pSrcView)
+  {
+    m_pRealContext->CopyStructureCount(UNWRAP(WrappedID3D11Buffer, pDstBuffer), DstAlignedByteOffset,
+                                       UNWRAP(WrappedID3D11UnorderedAccessView1, pSrcView));
+
+    if(IsLoading(m_State))
+    {
+      WrappedID3D11UnorderedAccessView1 *view = (WrappedID3D11UnorderedAccessView1 *)pSrcView;
+
+      ResourceId dstLiveID = GetIDForDeviceChild(pDstBuffer);
+      ResourceId srcLiveID = view->GetResourceResID();
+      ResourceId dstOrigID = GetResourceManager()->GetOriginalID(dstLiveID);
+      ResourceId srcOrigID = GetResourceManager()->GetOriginalID(srcLiveID);
+
+      AddEvent();
+
+      DrawcallDescription draw;
+      draw.name = "CopyStructureCount(" + ToStr(dstOrigID) + ", " + ToStr(srcOrigID) + ")";
+      draw.flags |= DrawFlags::Copy;
+      draw.copySource = srcOrigID;
+      draw.copySourceSubresource = Subresource();
+      draw.copyDestination = dstOrigID;
+      draw.copyDestinationSubresource = Subresource();
+
+      if(m_CurEventID)
+      {
+        if(dstLiveID == srcLiveID)
+        {
+          m_ResourceUses[dstLiveID].push_back(EventUsage(m_CurEventID, ResourceUsage::Copy));
+        }
+        else
+        {
+          m_ResourceUses[dstLiveID].push_back(EventUsage(m_CurEventID, ResourceUsage::CopyDst));
+          m_ResourceUses[srcLiveID].push_back(EventUsage(m_CurEventID, ResourceUsage::CopySrc));
+        }
+      }
+
+      AddDrawcall(draw, true);
+    }
+  }
+
+  return true;
 }
 
-void WrappedID3D11DeviceContext::CopyStructureCount(ID3D11Buffer *pDstBuffer, UINT DstAlignedByteOffset, ID3D11UnorderedAccessView *pSrcView)
+void WrappedID3D11DeviceContext::CopyStructureCount(ID3D11Buffer *pDstBuffer,
+                                                    UINT DstAlignedByteOffset,
+                                                    ID3D11UnorderedAccessView *pSrcView)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(COPY_STRUCTURE_COUNT);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_CopyStructureCount(pDstBuffer, DstAlignedByteOffset, pSrcView);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-		
-		m_MissingTracks.insert(GetIDForResource(pDstBuffer));
-		MarkResourceReferenced(GetIDForResource(pDstBuffer), eFrameRef_Read);
-		MarkResourceReferenced(GetIDForResource(pDstBuffer), eFrameRef_Write);
+  m_EmptyCommandList = false;
 
-		MarkResourceReferenced(GetIDForResource(pSrcView), eFrameRef_Read);
-	}
-	else if(m_State >= WRITING)
-	{
-		// needs to go into device serialiser
+  SERIALISE_TIME_CALL(m_pRealContext->CopyStructureCount(
+      UNWRAP(WrappedID3D11Buffer, pDstBuffer), DstAlignedByteOffset,
+      UNWRAP(WrappedID3D11UnorderedAccessView1, pSrcView)));
 
-		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pDstBuffer));
-		RDCASSERT(record);
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::CopyStructureCount);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_CopyStructureCount(GET_SERIALISER, pDstBuffer, DstAlignedByteOffset, pSrcView);
 
-		D3D11ResourceRecord *srcRecord = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pSrcView));
-		RDCASSERT(srcRecord);
+    m_ContextRecord->AddChunk(scope.Get());
 
-		record->AddParent(srcRecord);
+    MarkDirtyResource(GetIDForDeviceChild(pDstBuffer));
 
-		ID3D11Resource *res = NULL;
-		pSrcView->GetResource(&res);
+    MarkResourceReferenced(GetIDForDeviceChild(pDstBuffer), eFrameRef_Read);
+    MarkResourceReferenced(GetIDForDeviceChild(pDstBuffer), eFrameRef_PartialWrite);
 
-		m_pDevice->GetResourceManager()->MarkDirtyResource(GetIDForResource(pDstBuffer));
+    MarkResourceReferenced(GetIDForDeviceChild(pSrcView), eFrameRef_Read);
+  }
+  else if(IsBackgroundCapturing(m_State))
+  {
+    // needs to go into device serialiser
 
-		SAFE_RELEASE(res);
-	}
+    D3D11ResourceRecord *record =
+        m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForDeviceChild(pDstBuffer));
+    RDCASSERT(record);
 
-	m_pRealContext->CopyStructureCount(UNWRAP(WrappedID3D11Buffer, pDstBuffer), DstAlignedByteOffset, UNWRAP(WrappedID3D11UnorderedAccessView, pSrcView));
+    D3D11ResourceRecord *srcRecord =
+        m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForDeviceChild(pSrcView));
+    RDCASSERT(srcRecord);
+
+    record->AddParent(srcRecord);
+
+    MarkDirtyResource(GetIDForDeviceChild(pDstBuffer));
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_ResolveSubresource(ID3D11Resource *pDstResource, UINT DstSubresource,
-																ID3D11Resource *pSrcResource, UINT SrcSubresource, DXGI_FORMAT Format_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_ResolveSubresource(SerialiserType &ser,
+                                                              ID3D11Resource *pDstResource,
+                                                              UINT DstSubresource,
+                                                              ID3D11Resource *pSrcResource,
+                                                              UINT SrcSubresource, DXGI_FORMAT Format)
 {
-	SERIALISE_ELEMENT(ResourceId, DestResource, GetIDForResource(pDstResource));
-	SERIALISE_ELEMENT(uint32_t, DestSubresource, DstSubresource);
-	SERIALISE_ELEMENT(ResourceId, SourceResource, GetIDForResource(pSrcResource));
-	SERIALISE_ELEMENT(uint32_t, SourceSubresource, SrcSubresource);
-	SERIALISE_ELEMENT(DXGI_FORMAT, Format, Format_);
+  SERIALISE_ELEMENT(pDstResource);
+  SERIALISE_ELEMENT(DstSubresource);
+  SERIALISE_ELEMENT(pSrcResource);
+  SERIALISE_ELEMENT(SrcSubresource);
+  SERIALISE_ELEMENT(Format);
 
-	if(m_State <= EXECUTING &&
-		 m_pDevice->GetResourceManager()->HasLiveResource(DestResource) &&
-		 m_pDevice->GetResourceManager()->HasLiveResource(SourceResource))
-	{
-		m_pRealContext->ResolveSubresource(m_pDevice->GetResourceManager()->UnwrapResource((ID3D11Resource*)m_pDevice->GetResourceManager()->GetLiveResource(DestResource)),
-												DestSubresource,
-												m_pDevice->GetResourceManager()->UnwrapResource((ID3D11Resource*)m_pDevice->GetResourceManager()->GetLiveResource(SourceResource)),
-												SourceSubresource, Format);
-	}
+  Serialise_DebugMessages(GET_SERIALISER);
 
-	const string desc = m_pSerialiser->GetDebugStr();
+  SERIALISE_CHECK_READ_ERRORS();
 
-	// version 5 added this as a drawcall, we can assume for older logs there's just no debug messages
-	if(m_pDevice->GetLogVersion() >= 0x000006)
-		Serialise_DebugMessages();
+  if(IsReplayingAndReading())
+  {
+    if(pDstResource && pSrcResource)
+    {
+      m_pRealContext->ResolveSubresource(UnwrapResource(pDstResource), DstSubresource,
+                                         UnwrapResource(pSrcResource), SrcSubresource, Format);
+    }
 
-	if(m_State == READING)
-	{
-		std::string dstName = GetDebugName(m_pDevice->GetResourceManager()->GetLiveResource(DestResource));
-		std::string srcName = GetDebugName(m_pDevice->GetResourceManager()->GetLiveResource(SourceResource));
+    if(IsLoading(m_State))
+    {
+      ResourceId dstLiveID = GetIDForDeviceChild(pDstResource);
+      ResourceId srcLiveID = GetIDForDeviceChild(pSrcResource);
+      ResourceId dstOrigID = GetResourceManager()->GetOriginalID(dstLiveID);
+      ResourceId srcOrigID = GetResourceManager()->GetOriginalID(srcLiveID);
 
-		if(dstName == "") dstName = ToStr::Get(DestResource);
-		if(srcName == "") srcName = ToStr::Get(SourceResource);
+      AddEvent();
 
-		AddEvent(RESOLVE_SUBRESOURCE, desc);
-		string name = "ResolveSubresource(" + dstName + ", " + srcName + ")";
+      DrawcallDescription draw;
+      draw.name = "ResolveSubresource(" + ToStr(dstOrigID) + ", " + ToStr(srcOrigID) + ")";
+      draw.flags |= DrawFlags::Resolve;
 
-		FetchDrawcall draw;
-		draw.name = name;
-		draw.flags |= eDraw_Resolve;
+      if(pDstResource && pSrcResource)
+      {
+        draw.copySource = srcOrigID;
+        draw.copySourceSubresource =
+            Subresource(GetMipForSubresource(pSrcResource, SrcSubresource),
+                        GetSliceForSubresource(pSrcResource, SrcSubresource));
+        draw.copyDestination = dstOrigID;
+        draw.copyDestinationSubresource =
+            Subresource(GetMipForSubresource(pDstResource, DstSubresource),
+                        GetSliceForSubresource(pDstResource, DstSubresource));
 
-		if(m_pDevice->GetResourceManager()->HasLiveResource(DestResource) &&
-			m_pDevice->GetResourceManager()->HasLiveResource(SourceResource))
-		{
-			draw.copySource = SourceResource;
-			draw.copyDestination = DestResource;
+        if(m_CurEventID)
+        {
+          if(dstLiveID == srcLiveID)
+          {
+            m_ResourceUses[dstLiveID].push_back(EventUsage(m_CurEventID, ResourceUsage::Resolve));
+          }
+          else
+          {
+            m_ResourceUses[dstLiveID].push_back(EventUsage(m_CurEventID, ResourceUsage::ResolveDst));
+            m_ResourceUses[srcLiveID].push_back(EventUsage(m_CurEventID, ResourceUsage::ResolveSrc));
+          }
+        }
+      }
 
-			if(DestResource == SourceResource)
-			{
-				m_ResourceUses[m_pDevice->GetResourceManager()->GetLiveID(DestResource)].push_back(EventUsage(m_CurEventID, eUsage_Resolve));
-			}
-			else
-			{
-				m_ResourceUses[m_pDevice->GetResourceManager()->GetLiveID(DestResource)].push_back(EventUsage(m_CurEventID, eUsage_ResolveDst));
-				m_ResourceUses[m_pDevice->GetResourceManager()->GetLiveID(SourceResource)].push_back(EventUsage(m_CurEventID, eUsage_ResolveSrc));
-			}
-		}
+      AddDrawcall(draw, true);
+    }
+  }
 
-		AddDrawcall(draw, true);
-	}
-
-	return true;
+  return true;
 }
 
-void WrappedID3D11DeviceContext::ResolveSubresource(ID3D11Resource *pDstResource, UINT DstSubresource,
-												ID3D11Resource *pSrcResource, UINT SrcSubresource, DXGI_FORMAT Format)
+void WrappedID3D11DeviceContext::ResolveSubresource(ID3D11Resource *pDstResource,
+                                                    UINT DstSubresource, ID3D11Resource *pSrcResource,
+                                                    UINT SrcSubresource, DXGI_FORMAT Format)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(RESOLVE_SUBRESOURCE);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_ResolveSubresource(pDstResource, DstSubresource, pSrcResource, SrcSubresource, Format);
-		
-		m_ContextRecord->AddChunk(scope.Get());
-		
-		m_MissingTracks.insert(GetIDForResource(pDstResource));
-		MarkResourceReferenced(GetIDForResource(pDstResource), eFrameRef_Read);
-		MarkResourceReferenced(GetIDForResource(pDstResource), eFrameRef_Write);
-		MarkResourceReferenced(GetIDForResource(pSrcResource), eFrameRef_Read);
-	}
-	else if(m_State >= WRITING)
-	{
-		// needs to go into device serialiser
+  m_EmptyCommandList = false;
 
-		RDCASSERT(WrappedID3D11Texture2D::IsAlloc(pDstResource) && WrappedID3D11Texture2D::IsAlloc(pSrcResource));
+  SERIALISE_TIME_CALL(
+      m_pRealContext->ResolveSubresource(UnwrapResource(pDstResource), DstSubresource,
+                                         UnwrapResource(pSrcResource), SrcSubresource, Format));
 
-		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pDstResource));
-		RDCASSERT(record);
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::ResolveSubresource);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_ResolveSubresource(GET_SERIALISER, pDstResource, DstSubresource, pSrcResource,
+                                 SrcSubresource, Format);
 
-		D3D11ResourceRecord *srcRecord = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pSrcResource));
-		RDCASSERT(srcRecord);
+    m_ContextRecord->AddChunk(scope.Get());
 
-		record->AddParent(srcRecord);
-
-		if(m_pDevice->GetResourceManager()->IsResourceDirty(GetIDForResource(pSrcResource)))
-			m_pDevice->GetResourceManager()->MarkDirtyResource(GetIDForResource(pDstResource));
-
-		SCOPED_SERIALISE_CONTEXT(RESOLVE_SUBRESOURCE);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_ResolveSubresource(pDstResource, DstSubresource, pSrcResource, SrcSubresource, Format);
-
-		// resolve subresource only really 'clears' if it's the only subresource.
-		// This is usually the case for render target textures though.
-		if(record->NumSubResources == 1)
-		{
-			record->LockChunks();
-			while(true)
-			{
-				Chunk *end = record->GetLastChunk();
-
-				if(end->GetChunkType() == CLEAR_RTV ||
-					end->GetChunkType() == CLEAR_DSV ||
-					end->GetChunkType() == CLEAR_UAV_FLOAT ||
-					end->GetChunkType() == CLEAR_UAV_INT ||
-					end->GetChunkType() == RESOLVE_SUBRESOURCE ||
-					end->GetChunkType() == COPY_RESOURCE)
-				{
-					SAFE_DELETE(end);
-
-					record->PopChunk();
-
-					continue;
-				}
-
-				break;
-			}
-			record->UnlockChunks();
-		}
-
-		record->AddChunk(scope.Get());
-	}
-
-	m_pRealContext->ResolveSubresource(m_pDevice->GetResourceManager()->UnwrapResource(pDstResource), DstSubresource,
-											m_pDevice->GetResourceManager()->UnwrapResource(pSrcResource), SrcSubresource, Format);
+    MarkDirtyResource(GetIDForDeviceChild(pDstResource));
+    MarkResourceReferenced(GetIDForDeviceChild(pDstResource), eFrameRef_Read);
+    MarkResourceReferenced(GetIDForDeviceChild(pDstResource), eFrameRef_PartialWrite);
+    MarkResourceReferenced(GetIDForDeviceChild(pSrcResource), eFrameRef_Read);
+  }
+  else if(IsBackgroundCapturing(m_State))
+  {
+    MarkDirtyResource(GetIDForDeviceChild(pDstResource));
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_GenerateMips(ID3D11ShaderResourceView *pShaderResourceView)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_GenerateMips(SerialiserType &ser,
+                                                        ID3D11ShaderResourceView *pShaderResourceView)
 {
-	SERIALISE_ELEMENT(ResourceId, ShaderResourceView, GetIDForResource(pShaderResourceView));
+  SERIALISE_ELEMENT(pShaderResourceView);
 
-	if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(ShaderResourceView))
-	{
-		m_pRealContext->GenerateMips(UNWRAP(WrappedID3D11ShaderResourceView, m_pDevice->GetResourceManager()->GetLiveResource(ShaderResourceView)));
-	}
+  Serialise_DebugMessages(GET_SERIALISER);
 
-	const string desc = m_pSerialiser->GetDebugStr();
+  SERIALISE_CHECK_READ_ERRORS();
 
-	// version 5 added this as a drawcall, we can assume for older logs there's just no debug messages
-	if(m_pDevice->GetLogVersion() >= 0x000006)
-		Serialise_DebugMessages();
+  if(IsReplayingAndReading())
+  {
+    if(pShaderResourceView)
+    {
+      m_pRealContext->GenerateMips(UNWRAP(WrappedID3D11ShaderResourceView1, pShaderResourceView));
+    }
 
-	if(m_State == READING)
-	{
-		ResourceId id = ShaderResourceView;
+    if(IsLoading(m_State))
+    {
+      WrappedID3D11ShaderResourceView1 *view =
+          (WrappedID3D11ShaderResourceView1 *)pShaderResourceView;
 
-		if(m_pDevice->GetResourceManager()->HasLiveResource(ShaderResourceView))
-		{
-			id = ((WrappedID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetLiveResource(ShaderResourceView))->GetResourceResID();
-			m_ResourceUses[id].push_back(EventUsage(m_CurEventID, eUsage_GenMips));
-			id = m_pDevice->GetResourceManager()->GetOriginalID(id);
-		}
+      if(view)
+      {
+        m_ResourceUses[view->GetResourceResID()].push_back(
+            EventUsage(m_CurEventID, ResourceUsage::GenMips, view->GetResourceID()));
+      }
 
-		std::string resName = GetDebugName(m_pDevice->GetResourceManager()->GetLiveResource(id));
+      AddEvent();
 
-		if(resName == "") resName = ToStr::Get(id);
+      DrawcallDescription draw;
+      draw.name =
+          "GenerateMips(" +
+          ToStr(GetResourceManager()->GetOriginalID(GetIDForDeviceChild(pShaderResourceView))) + ")";
+      draw.flags |= DrawFlags::GenMips;
 
-		AddEvent(GENERATE_MIPS, desc);
-		string name = "GenerateMips(" + resName + ")";
+      AddDrawcall(draw, true);
+    }
+  }
 
-		FetchDrawcall draw;
-		draw.name = name;
-		draw.flags |= eDraw_GenMips;
-
-		AddDrawcall(draw, true);
-
-		if(m_pDevice->GetResourceManager()->HasLiveResource(ShaderResourceView))
-			m_ResourceUses[((WrappedID3D11ShaderResourceView *)m_pDevice->GetResourceManager()->GetLiveResource(ShaderResourceView))->GetResourceResID()]
-				.push_back(EventUsage(m_CurEventID, eUsage_GenMips));
-	}
-
-	return true;
+  return true;
 }
 
 void WrappedID3D11DeviceContext::GenerateMips(ID3D11ShaderResourceView *pShaderResourceView)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	if(!pShaderResourceView)
-		return;
+  m_EmptyCommandList = false;
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(GENERATE_MIPS);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_GenerateMips(pShaderResourceView);
-		
-		m_ContextRecord->AddChunk(scope.Get());
+  if(!pShaderResourceView)
+    return;
 
-		ID3D11Resource *res = NULL;
-		pShaderResourceView->GetResource(&res);
+  SERIALISE_TIME_CALL(
+      m_pRealContext->GenerateMips(UNWRAP(WrappedID3D11ShaderResourceView1, pShaderResourceView)));
 
-		m_MissingTracks.insert(GetIDForResource(res));
-		
-		MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
-		MarkResourceReferenced(GetIDForResource(res), eFrameRef_Write);
-		MarkResourceReferenced(GetIDForResource(pShaderResourceView), eFrameRef_Read);
-		SAFE_RELEASE(res);
-	}
-	else if(m_State >= WRITING)
-	{
-		ID3D11Resource *res = NULL;
-		pShaderResourceView->GetResource(&res);
-		ResourceId id = GetIDForResource(res);
-		m_pDevice->GetResourceManager()->MarkDirtyResource(id);
-		SAFE_RELEASE(res);
-	}
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::GenerateMips);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_GenerateMips(GET_SERIALISER, pShaderResourceView);
 
-	m_pRealContext->GenerateMips(UNWRAP(WrappedID3D11ShaderResourceView, pShaderResourceView));
+    m_ContextRecord->AddChunk(scope.Get());
+
+    ResourceId id = GetViewResourceResID(pShaderResourceView);
+
+    MarkDirtyResource(id);
+
+    MarkResourceReferenced(id, eFrameRef_Read);
+    MarkResourceReferenced(id, eFrameRef_PartialWrite);
+    MarkResourceReferenced(GetIDForDeviceChild(pShaderResourceView), eFrameRef_Read);
+  }
+  else if(IsBackgroundCapturing(m_State))
+  {
+    MarkDirtyResource(GetViewResourceResID(pShaderResourceView));
+  }
 }
 
 #pragma endregion Copy
 
 #pragma region Clear
 
-bool WrappedID3D11DeviceContext::Serialise_ClearState()
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_ClearState(SerialiserType &ser)
 {
-	if(m_State <= EXECUTING)
-	{
-		m_CurrentPipelineState->Clear();
-		m_pRealContext->ClearState();
-		VerifyState();
-	}
+  if(IsReplayingAndReading())
+  {
+    // end stream-out queries for outgoing targets
+    for(UINT b = 0; b < D3D11_SO_STREAM_COUNT; b++)
+    {
+      ID3D11Buffer *buf = m_CurrentPipelineState->SO.Buffers[b];
 
-	return true;
+      if(buf)
+      {
+        ResourceId id = GetIDForDeviceChild(buf);
+
+        if(m_StreamOutCounters[id].running)
+        {
+          m_pRealContext->End(m_StreamOutCounters[id].query);
+          m_StreamOutCounters[id].running = false;
+        }
+      }
+    }
+
+    m_CurrentPipelineState->Clear();
+    m_pRealContext->ClearState();
+    VerifyState();
+  }
+
+  return true;
 }
 
 void WrappedID3D11DeviceContext::ClearState()
 {
-	m_EmptyCommandList = false;
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(CLEAR_STATE);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_ClearState();
+  m_EmptyCommandList = false;
 
-		m_ContextRecord->AddChunk(scope.Get());
-	}
+  SERIALISE_TIME_CALL(m_pRealContext->ClearState());
 
-	m_CurrentPipelineState->Clear();
-	m_pRealContext->ClearState();
-	VerifyState();
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::ClearState);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_ClearState(GET_SERIALISER);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+
+  // end stream-out queries for outgoing targets
+  for(UINT b = 0; b < D3D11_SO_STREAM_COUNT; b++)
+  {
+    ID3D11Buffer *buf = m_CurrentPipelineState->SO.Buffers[b];
+
+    if(buf)
+    {
+      ResourceId id = GetIDForDeviceChild(buf);
+
+      if(m_StreamOutCounters[id].running)
+      {
+        m_pRealContext->End(m_StreamOutCounters[id].query);
+        m_StreamOutCounters[id].running = false;
+      }
+    }
+  }
+
+  m_CurrentPipelineState->Clear();
+  VerifyState();
 }
 
-bool WrappedID3D11DeviceContext::Serialise_ClearRenderTargetView(ID3D11RenderTargetView *pRenderTargetView, const FLOAT ColorRGBA[4])
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_ClearRenderTargetView(
+    SerialiserType &ser, ID3D11RenderTargetView *pRenderTargetView, const FLOAT ColorRGBA[4])
 {
-	SERIALISE_ELEMENT(ResourceId, View, GetIDForResource(pRenderTargetView));
-	
-	float Color[4] = {0};
+  SERIALISE_ELEMENT(pRenderTargetView);
+  SERIALISE_ELEMENT_ARRAY(ColorRGBA, 4);
 
-	if(m_State >= WRITING)
-		memcpy(Color, ColorRGBA, sizeof(float)*4);
+  Serialise_DebugMessages(GET_SERIALISER);
 
-	m_pSerialiser->SerialisePODArray<4>("ColorRGBA", Color);
+  SERIALISE_CHECK_READ_ERRORS();
 
-	if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(View))
-	{
-		m_pRealContext->ClearRenderTargetView(UNWRAP(WrappedID3D11RenderTargetView, m_pDevice->GetResourceManager()->GetLiveResource(View)), Color);
-	}
-	
-	const string desc = m_pSerialiser->GetDebugStr();
-	
-	Serialise_DebugMessages();
+  if(IsReplayingAndReading())
+  {
+    if(pRenderTargetView)
+    {
+      m_pRealContext->ClearRenderTargetView(
+          UNWRAP(WrappedID3D11RenderTargetView1, pRenderTargetView), ColorRGBA);
+    }
 
-	if(m_State == READING)
-	{
-		AddEvent(CLEAR_RTV, desc);
-		string name = "ClearRenderTargetView(" +
-							ToStr::Get(Color[0]) + ", " +
-							ToStr::Get(Color[1]) + ", " +
-							ToStr::Get(Color[2]) + ", " +
-							ToStr::Get(Color[3]) +
-							")";
+    if(IsLoading(m_State))
+    {
+      AddEvent();
 
-		FetchDrawcall draw;
-		draw.name = name;
-		draw.flags |= eDraw_Clear|eDraw_ClearColour;
+      WrappedID3D11RenderTargetView1 *view = (WrappedID3D11RenderTargetView1 *)pRenderTargetView;
 
-		AddDrawcall(draw, true);
+      DrawcallDescription draw;
+      draw.name = StringFormat::Fmt("ClearRenderTargetView(%f, %f, %f, %f)", ColorRGBA[0],
+                                    ColorRGBA[1], ColorRGBA[2], ColorRGBA[3]);
+      draw.flags |= DrawFlags::Clear | DrawFlags::ClearColor;
 
-		if(m_pDevice->GetResourceManager()->HasLiveResource(View))
-			m_ResourceUses[((WrappedID3D11RenderTargetView *)m_pDevice->GetResourceManager()->GetLiveResource(View))->GetResourceResID()]
-				.push_back(EventUsage(m_CurEventID, eUsage_Clear));
-	}
+      if(view)
+      {
+        m_ResourceUses[view->GetResourceResID()].push_back(
+            EventUsage(m_CurEventID, ResourceUsage::Clear, view->GetResourceID()));
+        draw.copyDestination =
+            m_pDevice->GetResourceManager()->GetOriginalID(view->GetResourceResID());
+        D3D11_RENDER_TARGET_VIEW_DESC viewDesc;
+        view->GetDesc(&viewDesc);
+        draw.copyDestinationSubresource =
+            Subresource(GetMipForRtv(viewDesc), GetSliceForRtv(viewDesc));
+      }
 
-	return true;
+      AddDrawcall(draw, true);
+    }
+  }
+
+  return true;
 }
 
-void WrappedID3D11DeviceContext::ClearRenderTargetView(ID3D11RenderTargetView *pRenderTargetView, const FLOAT ColorRGBA[4])
+void WrappedID3D11DeviceContext::ClearRenderTargetView(ID3D11RenderTargetView *pRenderTargetView,
+                                                       const FLOAT ColorRGBA[4])
 {
-	DrainAnnotationQueue();
+  DrainAnnotationQueue();
 
-	if(pRenderTargetView == NULL) return;
+  if(pRenderTargetView == NULL)
+    return;
 
-	m_EmptyCommandList = false;
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_pRealContext->ClearRenderTargetView(UNWRAP(WrappedID3D11RenderTargetView, pRenderTargetView), ColorRGBA);
+  m_EmptyCommandList = false;
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(CLEAR_RTV);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_ClearRenderTargetView(pRenderTargetView, ColorRGBA);
-		
-		ID3D11Resource *res = NULL;
-		pRenderTargetView->GetResource(&res);
+  SERIALISE_TIME_CALL(m_pRealContext->ClearRenderTargetView(
+      UNWRAP(WrappedID3D11RenderTargetView1, pRenderTargetView), ColorRGBA));
 
-		m_MissingTracks.insert(GetIDForResource(res));
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::ClearRenderTargetView);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_ClearRenderTargetView(GET_SERIALISER, pRenderTargetView, ColorRGBA);
 
-		SAFE_RELEASE(res);
+    MarkResourceReferenced(GetViewResourceResID(pRenderTargetView), eFrameRef_PartialWrite);
+    MarkResourceReferenced(GetIDForDeviceChild(pRenderTargetView), eFrameRef_Read);
+    MarkDirtyResource(GetViewResourceResID(pRenderTargetView));
 
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	else if(m_State >= WRITING)
-	{
-		SCOPED_SERIALISE_CONTEXT(CLEAR_RTV);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_ClearRenderTargetView(pRenderTargetView, ColorRGBA);
-		
-		ID3D11Resource *viewRes = NULL;
-		pRenderTargetView->GetResource(&viewRes);
-		ResourceId id = GetIDForResource(viewRes);
-		SAFE_RELEASE(viewRes);
-
-		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(id);
-		RDCASSERT(record);
-
-		record->LockChunks();
-		while(true)
-		{
-			Chunk *end = record->GetLastChunk();
-
-			if(end->GetChunkType() == CLEAR_RTV ||
-				end->GetChunkType() == CLEAR_DSV ||
-				end->GetChunkType() == CLEAR_UAV_FLOAT ||
-				end->GetChunkType() == CLEAR_UAV_INT ||
-				end->GetChunkType() == RESOLVE_SUBRESOURCE ||
-				end->GetChunkType() == COPY_RESOURCE)
-			{
-				SAFE_DELETE(end);
-
-				record->PopChunk();
-
-				continue;
-			}
-
-			break;
-		}
-		record->UnlockChunks();
-
-		record->AddChunk(scope.Get());
-	}
-
-	if(pRenderTargetView && m_State >= WRITING)
-	{
-		ID3D11Resource *res = NULL;
-		pRenderTargetView->GetResource(&res);
-
-		if(m_State == WRITING_CAPFRAME)
-		{
-			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Write);
-			MarkResourceReferenced(GetIDForResource(pRenderTargetView), eFrameRef_Read);
-		}
-		
-		if(m_State == WRITING_IDLE)
-			m_pDevice->GetResourceManager()->MarkCleanResource(GetIDForResource(res));
-		SAFE_RELEASE(res);
-	}
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+  else if(IsBackgroundCapturing(m_State))
+  {
+    MarkDirtyResource(GetViewResourceResID(pRenderTargetView));
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_ClearUnorderedAccessViewUint(ID3D11UnorderedAccessView *pUnorderedAccessView, const UINT Values_[4])
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_ClearUnorderedAccessViewUint(
+    SerialiserType &ser, ID3D11UnorderedAccessView *pUnorderedAccessView, const UINT Values[4])
 {
-	SERIALISE_ELEMENT(ResourceId, View, GetIDForResource(pUnorderedAccessView));
-	
-	UINT Values[4] = {0};
+  SERIALISE_ELEMENT(pUnorderedAccessView);
+  SERIALISE_ELEMENT_ARRAY(Values, 4);
 
-	if(m_State >= WRITING)
-		memcpy(Values, Values_, sizeof(UINT)*4);
+  Serialise_DebugMessages(GET_SERIALISER);
 
-	m_pSerialiser->SerialisePODArray<4>("Values", Values);
+  SERIALISE_CHECK_READ_ERRORS();
 
-	if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(View))
-	{
-		m_pRealContext->ClearUnorderedAccessViewUint(UNWRAP(WrappedID3D11UnorderedAccessView, m_pDevice->GetResourceManager()->GetLiveResource(View)), Values);
-	}
-	
-	const string desc = m_pSerialiser->GetDebugStr();
-	
-	if(m_State == READING)
-	{
-		AddEvent(CLEAR_UAV_INT, desc);
-		string name = "ClearUnorderedAccessViewUint(" +
-							ToStr::Get(Values[0]) + ", " +
-							ToStr::Get(Values[1]) + ", " +
-							ToStr::Get(Values[2]) + ", " +
-							ToStr::Get(Values[3]) +
-							")";
+  if(IsReplayingAndReading())
+  {
+    if(pUnorderedAccessView)
+    {
+      m_pRealContext->ClearUnorderedAccessViewUint(
+          UNWRAP(WrappedID3D11UnorderedAccessView1, pUnorderedAccessView), Values);
+    }
 
-		FetchDrawcall draw;
-		draw.name = name;
+    if(IsLoading(m_State))
+    {
+      AddEvent();
 
-		draw.flags |= eDraw_Clear;
+      WrappedID3D11UnorderedAccessView1 *view =
+          (WrappedID3D11UnorderedAccessView1 *)pUnorderedAccessView;
 
-		AddDrawcall(draw, true);
+      DrawcallDescription draw;
+      draw.name = StringFormat::Fmt("ClearUnorderedAccessViewUint(%u, %u, %u, %u)", Values[0],
+                                    Values[1], Values[2], Values[3]);
+      draw.flags |= DrawFlags::Clear;
 
-		if(m_pDevice->GetResourceManager()->HasLiveResource(View))
-			m_ResourceUses[((WrappedID3D11UnorderedAccessView *)m_pDevice->GetResourceManager()->GetLiveResource(View))->GetResourceResID()]
-				.push_back(EventUsage(m_CurEventID, eUsage_Clear));
-	}
+      if(view)
+      {
+        m_ResourceUses[view->GetResourceResID()].push_back(
+            EventUsage(m_CurEventID, ResourceUsage::Clear, view->GetResourceID()));
+        draw.copyDestination =
+            m_pDevice->GetResourceManager()->GetOriginalID(view->GetResourceResID());
+        draw.copyDestinationSubresource = Subresource();
+      }
 
-	return true;
+      AddDrawcall(draw, true);
+    }
+  }
+
+  return true;
 }
 
-void WrappedID3D11DeviceContext::ClearUnorderedAccessViewUint(ID3D11UnorderedAccessView *pUnorderedAccessView, const UINT Values[4])
+void WrappedID3D11DeviceContext::ClearUnorderedAccessViewUint(
+    ID3D11UnorderedAccessView *pUnorderedAccessView, const UINT Values[4])
 {
-	m_EmptyCommandList = false;
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(CLEAR_UAV_INT);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_ClearUnorderedAccessViewUint(pUnorderedAccessView, Values);
-		
-		ID3D11Resource *res = NULL;
-		pUnorderedAccessView->GetResource(&res);
+  m_EmptyCommandList = false;
 
-		m_MissingTracks.insert(GetIDForResource(res));
+  SERIALISE_TIME_CALL(m_pRealContext->ClearUnorderedAccessViewUint(
+      UNWRAP(WrappedID3D11UnorderedAccessView1, pUnorderedAccessView), Values));
 
-		SAFE_RELEASE(res);
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::ClearUnorderedAccessViewUint);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_ClearUnorderedAccessViewUint(GET_SERIALISER, pUnorderedAccessView, Values);
 
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	else if(m_State >= WRITING)
-	{
-		SCOPED_SERIALISE_CONTEXT(CLEAR_UAV_INT);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_ClearUnorderedAccessViewUint(pUnorderedAccessView, Values);
+    if(pUnorderedAccessView)
+    {
+      MarkResourceReferenced(GetViewResourceResID(pUnorderedAccessView), eFrameRef_PartialWrite);
+      MarkResourceReferenced(GetIDForDeviceChild(pUnorderedAccessView), eFrameRef_Read);
+    }
 
-		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pUnorderedAccessView));
-		RDCASSERT(record);
+    MarkDirtyResource(GetViewResourceResID(pUnorderedAccessView));
 
-		record->LockChunks();
-		while(true)
-		{
-			Chunk *end = record->GetLastChunk();
-
-			if(end->GetChunkType() == CLEAR_RTV ||
-				end->GetChunkType() == CLEAR_DSV ||
-				end->GetChunkType() == CLEAR_UAV_FLOAT ||
-				end->GetChunkType() == CLEAR_UAV_INT ||
-				end->GetChunkType() == RESOLVE_SUBRESOURCE ||
-				end->GetChunkType() == COPY_RESOURCE)
-			{
-				SAFE_DELETE(end);
-
-				record->PopChunk();
-
-				continue;
-			}
-
-			break;
-		}
-		record->UnlockChunks();
-
-		record->AddChunk(scope.Get());
-	}
-	
-	if(pUnorderedAccessView && m_State >= WRITING)
-	{
-		ID3D11Resource *res = NULL;
-		pUnorderedAccessView->GetResource(&res);
-		
-		if(m_State == WRITING_CAPFRAME)
-		{
-			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Write);
-			MarkResourceReferenced(GetIDForResource(pUnorderedAccessView), eFrameRef_Read);
-		}
-		
-		if(m_State == WRITING_IDLE)
-			m_pDevice->GetResourceManager()->MarkCleanResource(GetIDForResource(res));
-		SAFE_RELEASE(res);
-	}
-
-	m_pRealContext->ClearUnorderedAccessViewUint(UNWRAP(WrappedID3D11UnorderedAccessView, pUnorderedAccessView), Values);
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+  else if(IsBackgroundCapturing(m_State))
+  {
+    MarkDirtyResource(GetViewResourceResID(pUnorderedAccessView));
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_ClearUnorderedAccessViewFloat(ID3D11UnorderedAccessView *pUnorderedAccessView, const FLOAT Values_[4])
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_ClearUnorderedAccessViewFloat(
+    SerialiserType &ser, ID3D11UnorderedAccessView *pUnorderedAccessView, const FLOAT Values[4])
 {
-	SERIALISE_ELEMENT(ResourceId, View, GetIDForResource(pUnorderedAccessView));
-	
-	FLOAT Values[4] = {0};
+  SERIALISE_ELEMENT(pUnorderedAccessView);
+  SERIALISE_ELEMENT_ARRAY(Values, 4);
 
-	if(m_State >= WRITING)
-		memcpy(Values, Values_, sizeof(FLOAT)*4);
+  Serialise_DebugMessages(GET_SERIALISER);
 
-	m_pSerialiser->SerialisePODArray<4>("Values", Values);
+  SERIALISE_CHECK_READ_ERRORS();
 
-	if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(View))
-	{
-		m_pRealContext->ClearUnorderedAccessViewFloat(UNWRAP(WrappedID3D11UnorderedAccessView, m_pDevice->GetResourceManager()->GetLiveResource(View)), Values);
-	}
-	
-	const string desc = m_pSerialiser->GetDebugStr();
-	
-	if(m_State == READING)
-	{
-		AddEvent(CLEAR_UAV_FLOAT, desc);
-		string name = "ClearUnorderedAccessViewFloat(" +
-							ToStr::Get(Values[0]) + ", " +
-							ToStr::Get(Values[1]) + ", " +
-							ToStr::Get(Values[2]) + ", " +
-							ToStr::Get(Values[3]) + ", " +
-							")";
+  if(IsReplayingAndReading())
+  {
+    if(pUnorderedAccessView)
+    {
+      m_pRealContext->ClearUnorderedAccessViewFloat(
+          UNWRAP(WrappedID3D11UnorderedAccessView1, pUnorderedAccessView), Values);
+    }
 
-		FetchDrawcall draw;
-		draw.name = (name);
-		draw.flags |= eDraw_Clear;
+    if(IsLoading(m_State))
+    {
+      AddEvent();
 
-		AddDrawcall(draw, true);
+      WrappedID3D11UnorderedAccessView1 *view =
+          (WrappedID3D11UnorderedAccessView1 *)pUnorderedAccessView;
 
-		if(m_pDevice->GetResourceManager()->HasLiveResource(View))
-			m_ResourceUses[((WrappedID3D11UnorderedAccessView *)m_pDevice->GetResourceManager()->GetLiveResource(View))->GetResourceResID()]
-				.push_back(EventUsage(m_CurEventID, eUsage_Clear));
-	}
+      DrawcallDescription draw;
+      draw.name = StringFormat::Fmt("ClearUnorderedAccessViewFloat(%f, %f, %f, %f)", Values[0],
+                                    Values[1], Values[2], Values[3]);
+      draw.flags |= DrawFlags::Clear;
 
-	return true;
+      if(view)
+      {
+        m_ResourceUses[view->GetResourceResID()].push_back(
+            EventUsage(m_CurEventID, ResourceUsage::Clear, view->GetResourceID()));
+        draw.copyDestination =
+            m_pDevice->GetResourceManager()->GetOriginalID(view->GetResourceResID());
+        draw.copyDestinationSubresource = Subresource();
+      }
+
+      AddDrawcall(draw, true);
+    }
+  }
+
+  return true;
 }
 
-void WrappedID3D11DeviceContext::ClearUnorderedAccessViewFloat(ID3D11UnorderedAccessView *pUnorderedAccessView, const FLOAT Values[4])
+void WrappedID3D11DeviceContext::ClearUnorderedAccessViewFloat(
+    ID3D11UnorderedAccessView *pUnorderedAccessView, const FLOAT Values[4])
 {
-	m_EmptyCommandList = false;
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(CLEAR_UAV_FLOAT);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_ClearUnorderedAccessViewFloat(pUnorderedAccessView, Values);
-		
-		ID3D11Resource *res = NULL;
-		pUnorderedAccessView->GetResource(&res);
+  m_EmptyCommandList = false;
 
-		m_MissingTracks.insert(GetIDForResource(res));
+  SERIALISE_TIME_CALL(m_pRealContext->ClearUnorderedAccessViewFloat(
+      UNWRAP(WrappedID3D11UnorderedAccessView1, pUnorderedAccessView), Values));
 
-		SAFE_RELEASE(res);
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::ClearUnorderedAccessViewFloat);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_ClearUnorderedAccessViewFloat(GET_SERIALISER, pUnorderedAccessView, Values);
 
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	else if(m_State >= WRITING)
-	{
-		SCOPED_SERIALISE_CONTEXT(CLEAR_UAV_FLOAT);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_ClearUnorderedAccessViewFloat(pUnorderedAccessView, Values);
+    if(pUnorderedAccessView)
+    {
+      MarkResourceReferenced(GetViewResourceResID(pUnorderedAccessView), eFrameRef_PartialWrite);
+      MarkResourceReferenced(GetIDForDeviceChild(pUnorderedAccessView), eFrameRef_Read);
+    }
 
-		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pUnorderedAccessView));
-		RDCASSERT(record);
+    MarkDirtyResource(GetViewResourceResID(pUnorderedAccessView));
 
-		record->LockChunks();
-		while(true)
-		{
-			Chunk *end = record->GetLastChunk();
-
-			if(end->GetChunkType() == CLEAR_RTV ||
-				end->GetChunkType() == CLEAR_DSV ||
-				end->GetChunkType() == CLEAR_UAV_FLOAT ||
-				end->GetChunkType() == CLEAR_UAV_INT ||
-				end->GetChunkType() == RESOLVE_SUBRESOURCE ||
-				end->GetChunkType() == COPY_RESOURCE)
-			{
-				SAFE_DELETE(end);
-
-				record->PopChunk();
-
-				continue;
-			}
-
-			break;
-		}
-		record->UnlockChunks();
-
-		record->AddChunk(scope.Get());
-	}
-	
-	if(pUnorderedAccessView && m_State >= WRITING)
-	{
-		ID3D11Resource *res = NULL;
-		pUnorderedAccessView->GetResource(&res);
-		
-		if(m_State == WRITING_CAPFRAME)
-		{
-			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Write);
-			MarkResourceReferenced(GetIDForResource(pUnorderedAccessView), eFrameRef_Read);
-		}
-		
-		if(m_State == WRITING_IDLE)
-			m_pDevice->GetResourceManager()->MarkCleanResource(GetIDForResource(res));
-		SAFE_RELEASE(res);
-	}
-
-	m_pRealContext->ClearUnorderedAccessViewFloat(UNWRAP(WrappedID3D11UnorderedAccessView, pUnorderedAccessView), Values);
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+  else if(IsBackgroundCapturing(m_State))
+  {
+    MarkDirtyResource(GetViewResourceResID(pUnorderedAccessView));
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_ClearDepthStencilView(ID3D11DepthStencilView *pDepthStencilView, UINT ClearFlags_, FLOAT Depth_, UINT8 Stencil_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_ClearDepthStencilView(
+    SerialiserType &ser, ID3D11DepthStencilView *pDepthStencilView, UINT ClearFlags, FLOAT Depth,
+    UINT8 Stencil)
 {
-	SERIALISE_ELEMENT(ResourceId, View, GetIDForResource(pDepthStencilView));
-	SERIALISE_ELEMENT(uint32_t, ClearFlags, ClearFlags_);
-	SERIALISE_ELEMENT(float, Depth, Depth_);
-	SERIALISE_ELEMENT(uint8_t, Stencil, Stencil_);
+  SERIALISE_ELEMENT(pDepthStencilView);
+  SERIALISE_ELEMENT_TYPED(D3D11_CLEAR_FLAG, ClearFlags);
+  SERIALISE_ELEMENT(Depth);
+  SERIALISE_ELEMENT(Stencil);
 
-	if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(View))
-	{
-		m_pRealContext->ClearDepthStencilView(UNWRAP(WrappedID3D11DepthStencilView, m_pDevice->GetResourceManager()->GetLiveResource(View)), ClearFlags, Depth, Stencil);
-	}
-	
-	const string desc = m_pSerialiser->GetDebugStr();
-	
-	Serialise_DebugMessages();
+  Serialise_DebugMessages(GET_SERIALISER);
 
-	if(m_State == READING)
-	{
-		AddEvent(CLEAR_DSV, desc);
-		string name = "ClearDepthStencilView(" +
-							ToStr::Get(Depth) + ", " +
-							ToStr::Get(Stencil) +
-							")";
+  SERIALISE_CHECK_READ_ERRORS();
 
-		FetchDrawcall draw;
-		draw.name = name;
-		draw.flags |= eDraw_Clear|eDraw_ClearDepthStencil;
+  if(IsReplayingAndReading())
+  {
+    if(pDepthStencilView)
+    {
+      m_pRealContext->ClearDepthStencilView(
+          UNWRAP(WrappedID3D11DepthStencilView, pDepthStencilView), ClearFlags, Depth, Stencil);
+    }
 
-		AddDrawcall(draw, true);
-		
-		if(m_pDevice->GetResourceManager()->HasLiveResource(View))
-			m_ResourceUses[((WrappedID3D11DepthStencilView *)m_pDevice->GetResourceManager()->GetLiveResource(View))->GetResourceResID()]
-				.push_back(EventUsage(m_CurEventID, eUsage_Clear));
-	}
+    if(IsLoading(m_State))
+    {
+      AddEvent();
 
-	return true;
+      WrappedID3D11DepthStencilView *view = (WrappedID3D11DepthStencilView *)pDepthStencilView;
+
+      DrawcallDescription draw;
+      if(ClearFlags == (D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL))
+        draw.name = StringFormat::Fmt("ClearDepthStencilView(D=%f, S=%02hhx)", Depth, Stencil);
+      else if(ClearFlags == D3D11_CLEAR_DEPTH)
+        draw.name = StringFormat::Fmt("ClearDepthStencilView(D=%f)", Depth);
+      else if(ClearFlags == D3D11_CLEAR_STENCIL)
+        draw.name = StringFormat::Fmt("ClearDepthStencilView(S=%02hhx)", Stencil);
+      else
+        draw.name = "ClearDepthStencilView(None)";
+      draw.flags |= DrawFlags::Clear | DrawFlags::ClearDepthStencil;
+
+      if(view)
+      {
+        m_ResourceUses[view->GetResourceResID()].push_back(
+            EventUsage(m_CurEventID, ResourceUsage::Clear, view->GetResourceID()));
+        draw.copyDestination =
+            m_pDevice->GetResourceManager()->GetOriginalID(view->GetResourceResID());
+        D3D11_DEPTH_STENCIL_VIEW_DESC viewDesc;
+        view->GetDesc(&viewDesc);
+        draw.copyDestinationSubresource =
+            Subresource(GetMipForDsv(viewDesc), GetSliceForDsv(viewDesc));
+      }
+
+      AddDrawcall(draw, true);
+    }
+  }
+
+  return true;
 }
 
-void WrappedID3D11DeviceContext::ClearDepthStencilView(ID3D11DepthStencilView *pDepthStencilView, UINT ClearFlags, FLOAT Depth, UINT8 Stencil)
+void WrappedID3D11DeviceContext::ClearDepthStencilView(ID3D11DepthStencilView *pDepthStencilView,
+                                                       UINT ClearFlags, FLOAT Depth, UINT8 Stencil)
 {
-	DrainAnnotationQueue();
+  DrainAnnotationQueue();
 
-	if(pDepthStencilView == NULL) return;
+  if(pDepthStencilView == NULL)
+    return;
 
-	m_EmptyCommandList = false;
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_pRealContext->ClearDepthStencilView(UNWRAP(WrappedID3D11DepthStencilView, pDepthStencilView), ClearFlags, Depth, Stencil);
+  m_EmptyCommandList = false;
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(CLEAR_DSV);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_ClearDepthStencilView(pDepthStencilView, ClearFlags, Depth, Stencil);
-		
-		ID3D11Resource *res = NULL;
-		pDepthStencilView->GetResource(&res);
+  SERIALISE_TIME_CALL(m_pRealContext->ClearDepthStencilView(
+      UNWRAP(WrappedID3D11DepthStencilView, pDepthStencilView), ClearFlags, Depth, Stencil));
 
-		m_MissingTracks.insert(GetIDForResource(res));
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    GET_SERIALISER.SetDrawChunk();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::ClearDepthStencilView);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_ClearDepthStencilView(GET_SERIALISER, pDepthStencilView, ClearFlags, Depth, Stencil);
 
-		SAFE_RELEASE(res);
+    MarkResourceReferenced(GetViewResourceResID(pDepthStencilView), eFrameRef_PartialWrite);
+    MarkResourceReferenced(GetIDForDeviceChild(pDepthStencilView), eFrameRef_Read);
+    MarkDirtyResource(GetViewResourceResID(pDepthStencilView));
 
-		m_ContextRecord->AddChunk(scope.Get());
-	}
-	else if(m_State >= WRITING)
-	{
-		SCOPED_SERIALISE_CONTEXT(CLEAR_DSV);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_ClearDepthStencilView(pDepthStencilView, ClearFlags, Depth, Stencil);
-
-		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pDepthStencilView));
-		RDCASSERT(record);
-
-		record->LockChunks();
-		while(true)
-		{
-			Chunk *end = record->GetLastChunk();
-
-			if(end->GetChunkType() == CLEAR_RTV ||
-				end->GetChunkType() == CLEAR_DSV ||
-				end->GetChunkType() == CLEAR_UAV_FLOAT ||
-				end->GetChunkType() == CLEAR_UAV_INT ||
-				end->GetChunkType() == RESOLVE_SUBRESOURCE ||
-				end->GetChunkType() == COPY_RESOURCE)
-			{
-				SAFE_DELETE(end);
-
-				record->PopChunk();
-
-				continue;
-			}
-
-			break;
-		}
-		record->UnlockChunks();
-
-		record->AddChunk(scope.Get());
-	}
-	
-	if(pDepthStencilView && m_State >= WRITING)
-	{
-		ID3D11Resource *res = NULL;
-		pDepthStencilView->GetResource(&res);
-		
-		if(m_State == WRITING_CAPFRAME)
-		{
-			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Write);
-			MarkResourceReferenced(GetIDForResource(pDepthStencilView), eFrameRef_Read);
-		}
-
-		if(m_State == WRITING_IDLE)
-			m_pDevice->GetResourceManager()->MarkCleanResource(GetIDForResource(res));
-		SAFE_RELEASE(res);
-	}
+    m_ContextRecord->AddChunk(scope.Get());
+  }
+  else if(IsBackgroundCapturing(m_State))
+  {
+    MarkDirtyResource(GetViewResourceResID(pDepthStencilView));
+  }
 }
 
 #pragma endregion Clear
 
 #pragma region Misc
 
-bool WrappedID3D11DeviceContext::Serialise_Begin(ID3D11Asynchronous *pAsync)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_Begin(SerialiserType &ser, ID3D11Asynchronous *pAsync)
 {
-	SERIALISE_ELEMENT(ResourceId, Async, GetIDForResource(pAsync));
+  SERIALISE_ELEMENT(pAsync);
 
-	SERIALISE_ELEMENT(bool, IsQuery, WrappedID3D11Query::IsAlloc(pAsync));
+  SERIALISE_CHECK_READ_ERRORS();
 
-	if(IsQuery)
-	{
-		D3D11_QUERY qt = D3D11_QUERY_EVENT;
+  if(IsReplayingAndReading() && pAsync)
+  {
+    ID3D11Asynchronous *unwrapped = NULL;
 
-		if(m_State >= WRITING)
-		{
-			D3D11_QUERY_DESC desc;
-			ID3D11Query *q = (ID3D11Query *)pAsync;
-			q->GetDesc(&desc);
+    // only replay predicates which can affect rendering, don't re-submit queries or counters (that
+    // might even interfere with queries we want to run)
+    if(WrappedID3D11Predicate::IsAlloc(pAsync))
+      unwrapped = UNWRAP(WrappedID3D11Predicate, pAsync);
 
-			qt = desc.Query;
-		}
+    // if you change this to replay other types, check with Serialise_CreateCounter which creates
+    // dummy queries to ensure it always succeeds.
 
-		SERIALISE_ELEMENT(D3D11_QUERY, QueryType, qt);
-	}
+    if(unwrapped)
+      m_pRealContext->Begin(unwrapped);
+  }
 
-	if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(Async))
-	{
-		//m_pImmediateContext->Begin((ID3D11Asynchronous *)m_pDevice->GetResourceManager()->GetLiveResource(Async));
-	}
-
-	return true;
+  return true;
 }
 
 void WrappedID3D11DeviceContext::Begin(ID3D11Asynchronous *pAsync)
 {
-	ID3D11Asynchronous *unwrapped = NULL;
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	if(WrappedID3D11Query::IsAlloc(pAsync))
-		unwrapped = UNWRAP(WrappedID3D11Query, pAsync);
-	else if(WrappedID3D11Predicate::IsAlloc(pAsync))
-		unwrapped = UNWRAP(WrappedID3D11Predicate, pAsync);
-	else if(WrappedID3D11Counter::IsAlloc(pAsync))
-		unwrapped = UNWRAP(WrappedID3D11Counter, pAsync);
-	else
-		RDCERR("Unexpected ID3D11Asynchronous");
-	
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(BEGIN);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_Begin(pAsync);
+  ID3D11Asynchronous *unwrapped = NULL;
+  ResourceId id;
 
-		m_ContextRecord->AddChunk(scope.Get());
-	}
+  if(WrappedID3D11Query1::IsAlloc(pAsync))
+  {
+    unwrapped = UNWRAP(WrappedID3D11Query1, pAsync);
+    id = ((WrappedID3D11Query1 *)pAsync)->GetResourceID();
+  }
+  else if(WrappedID3D11Predicate::IsAlloc(pAsync))
+  {
+    unwrapped = UNWRAP(WrappedID3D11Predicate, pAsync);
+    id = ((WrappedID3D11Predicate *)pAsync)->GetResourceID();
+  }
+  else if(WrappedID3D11Counter::IsAlloc(pAsync))
+  {
+    unwrapped = UNWRAP(WrappedID3D11Counter, pAsync);
+    id = ((WrappedID3D11Counter *)pAsync)->GetResourceID();
+  }
+  else
+  {
+    RDCERR("Unexpected ID3D11Asynchronous");
+  }
 
-	m_pRealContext->Begin(unwrapped);
+  SERIALISE_TIME_CALL(m_pRealContext->Begin(unwrapped));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::Begin);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_Begin(GET_SERIALISER, pAsync);
+
+    m_ContextRecord->AddChunk(scope.Get());
+
+    MarkResourceReferenced(id, eFrameRef_Read);
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_End(ID3D11Asynchronous *pAsync)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_End(SerialiserType &ser, ID3D11Asynchronous *pAsync)
 {
-	SERIALISE_ELEMENT(ResourceId, Async, GetIDForResource(pAsync));
+  SERIALISE_ELEMENT(pAsync);
 
-	SERIALISE_ELEMENT(bool, IsQuery, WrappedID3D11Query::IsAlloc(pAsync));
+  SERIALISE_CHECK_READ_ERRORS();
 
-	if(IsQuery)
-	{
-		D3D11_QUERY qt = D3D11_QUERY_EVENT;
+  if(IsReplayingAndReading() && pAsync)
+  {
+    ID3D11Asynchronous *unwrapped = NULL;
 
-		if(m_State >= WRITING)
-		{
-			D3D11_QUERY_DESC desc;
-			ID3D11Query *q = (ID3D11Query *)pAsync;
-			q->GetDesc(&desc);
+    // only replay predicates which can affect rendering, don't re-submit queries or counters (that
+    // might even interfere with queries we want to run)
+    if(WrappedID3D11Predicate::IsAlloc(pAsync))
+      unwrapped = UNWRAP(WrappedID3D11Predicate, pAsync);
 
-			qt = desc.Query;
-		}
+    // if you change this to replay other types, check with Serialise_CreateCounter which creates
+    // dummy queries to ensure it always succeeds.
 
-		SERIALISE_ELEMENT(D3D11_QUERY, QueryType, qt);
-	}
+    if(unwrapped)
+      m_pRealContext->End(unwrapped);
+  }
 
-	if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(Async))
-	{
-		//m_pImmediateContext->End((ID3D11Asynchronous *)m_pDevice->GetResourceManager()->GetLiveResource(Async));
-	}
-
-	return true;
+  return true;
 }
 
 void WrappedID3D11DeviceContext::End(ID3D11Asynchronous *pAsync)
 {
-	ID3D11Asynchronous *unwrapped = NULL;
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	if(WrappedID3D11Query::IsAlloc(pAsync))
-		unwrapped = UNWRAP(WrappedID3D11Query, pAsync);
-	else if(WrappedID3D11Predicate::IsAlloc(pAsync))
-		unwrapped = UNWRAP(WrappedID3D11Predicate, pAsync);
-	else if(WrappedID3D11Counter::IsAlloc(pAsync))
-		unwrapped = UNWRAP(WrappedID3D11Counter, pAsync);
-	else
-		RDCERR("Unexpected ID3D11Asynchronous");
-	
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(BEGIN);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_End(pAsync);
+  ID3D11Asynchronous *unwrapped = NULL;
+  ResourceId id;
 
-		m_ContextRecord->AddChunk(scope.Get());
-	}
+  if(WrappedID3D11Query1::IsAlloc(pAsync))
+  {
+    unwrapped = UNWRAP(WrappedID3D11Query1, pAsync);
+    id = ((WrappedID3D11Query1 *)pAsync)->GetResourceID();
+  }
+  else if(WrappedID3D11Predicate::IsAlloc(pAsync))
+  {
+    unwrapped = UNWRAP(WrappedID3D11Predicate, pAsync);
+    id = ((WrappedID3D11Predicate *)pAsync)->GetResourceID();
+  }
+  else if(WrappedID3D11Counter::IsAlloc(pAsync))
+  {
+    unwrapped = UNWRAP(WrappedID3D11Counter, pAsync);
+    id = ((WrappedID3D11Counter *)pAsync)->GetResourceID();
+  }
+  else
+  {
+    RDCERR("Unexpected ID3D11Asynchronous");
+  }
 
-	m_pRealContext->End(unwrapped);
+  SERIALISE_TIME_CALL(m_pRealContext->End(unwrapped));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::End);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_End(GET_SERIALISER, pAsync);
+
+    m_ContextRecord->AddChunk(scope.Get());
+
+    MarkResourceReferenced(id, eFrameRef_Read);
+  }
 }
 
-HRESULT WrappedID3D11DeviceContext::GetData(ID3D11Asynchronous *pAsync, void *pData, UINT DataSize, UINT GetDataFlags)
+HRESULT WrappedID3D11DeviceContext::GetData(ID3D11Asynchronous *pAsync, void *pData, UINT DataSize,
+                                            UINT GetDataFlags)
 {
-	ID3D11Asynchronous *unwrapped = NULL;
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	if(WrappedID3D11Query::IsAlloc(pAsync))
-		unwrapped = UNWRAP(WrappedID3D11Query, pAsync);
-	else if(WrappedID3D11Predicate::IsAlloc(pAsync))
-		unwrapped = UNWRAP(WrappedID3D11Predicate, pAsync);
-	else if(WrappedID3D11Counter::IsAlloc(pAsync))
-		unwrapped = UNWRAP(WrappedID3D11Counter, pAsync);
-	else
-		RDCERR("Unexpected ID3D11Asynchronous");
+  ID3D11Asynchronous *unwrapped = NULL;
 
-	return m_pRealContext->GetData(unwrapped, pData, DataSize, GetDataFlags);
+  if(WrappedID3D11Query1::IsAlloc(pAsync))
+    unwrapped = UNWRAP(WrappedID3D11Query1, pAsync);
+  else if(WrappedID3D11Predicate::IsAlloc(pAsync))
+    unwrapped = UNWRAP(WrappedID3D11Predicate, pAsync);
+  else if(WrappedID3D11Counter::IsAlloc(pAsync))
+    unwrapped = UNWRAP(WrappedID3D11Counter, pAsync);
+  else
+    RDCERR("Unexpected ID3D11Asynchronous");
+
+  return m_pRealContext->GetData(unwrapped, pData, DataSize, GetDataFlags);
 }
 
-bool WrappedID3D11DeviceContext::Serialise_SetPredication(ID3D11Predicate *pPredicate, BOOL PredicateValue_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_SetPredication(SerialiserType &ser,
+                                                          ID3D11Predicate *pPredicate,
+                                                          BOOL PredicateValue_)
 {
-	SERIALISE_ELEMENT(ResourceId, Predicate, GetIDForResource(pPredicate));
-	SERIALISE_ELEMENT(uint8_t, PredicateValue, PredicateValue_ == TRUE);
+  SERIALISE_ELEMENT(pPredicate);
+  SERIALISE_ELEMENT_LOCAL(PredicateValue, PredicateValue_ == TRUE);
 
-	if(m_State <= EXECUTING)
-	{
-		pPredicate = NULL;
-		if(m_pDevice->GetResourceManager()->HasLiveResource(Predicate))
-			pPredicate = UNWRAP(WrappedID3D11Predicate, m_pDevice->GetResourceManager()->GetLiveResource(Predicate));
-		m_pRealContext->SetPredication(pPredicate, PredicateValue);
-	}
+  SERIALISE_CHECK_READ_ERRORS();
 
-	return true;
+  if(IsReplayingAndReading())
+  {
+    // we don't replay predication as it can be confusing and inconsistent. We just store the state
+    // so that we can manually check whether it *would* have passed or failed.
+    m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->Predicate, pPredicate);
+    m_CurrentPipelineState->Change(m_CurrentPipelineState->PredicateValue,
+                                   PredicateValue ? TRUE : FALSE);
+
+    /*
+    m_pRealContext->SetPredication(UNWRAP(WrappedID3D11Predicate, pPredicate),
+                                   PredicateValue ? TRUE : FALSE);
+                                   */
+  }
+
+  return true;
 }
 
 void WrappedID3D11DeviceContext::SetPredication(ID3D11Predicate *pPredicate, BOOL PredicateValue)
 {
-	m_EmptyCommandList = false;
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_PREDICATION);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_SetPredication(pPredicate, PredicateValue);
+  m_EmptyCommandList = false;
 
-		m_ContextRecord->AddChunk(scope.Get());
-	}
+  m_CurrentPipelineState->ChangeRefRead(m_CurrentPipelineState->Predicate, pPredicate);
+  m_CurrentPipelineState->Change(m_CurrentPipelineState->PredicateValue, PredicateValue);
 
-	m_pRealContext->SetPredication(UNWRAP(WrappedID3D11Predicate, pPredicate), PredicateValue);
+  // on replay don't actually apply any predication. Just update the state and bail
+  if(IsReplayMode(m_State))
+    return;
+
+  SERIALISE_TIME_CALL(
+      m_pRealContext->SetPredication(UNWRAP(WrappedID3D11Predicate, pPredicate), PredicateValue));
+
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::SetPredication);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_SetPredication(GET_SERIALISER, pPredicate, PredicateValue);
+
+    m_ContextRecord->AddChunk(scope.Get());
+
+    if(pPredicate)
+    {
+      ResourceId id = ((WrappedID3D11Predicate *)pPredicate)->GetResourceID();
+      MarkResourceReferenced(id, eFrameRef_Read);
+    }
+  }
 }
 
 FLOAT WrappedID3D11DeviceContext::GetResourceMinLOD(ID3D11Resource *pResource)
 {
-	return m_pRealContext->GetResourceMinLOD(m_pDevice->GetResourceManager()->UnwrapResource(pResource));
+  return m_pRealContext->GetResourceMinLOD(UnwrapResource(pResource));
 }
 
-bool WrappedID3D11DeviceContext::Serialise_SetResourceMinLOD(ID3D11Resource *pResource, FLOAT MinLOD_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_SetResourceMinLOD(SerialiserType &ser,
+                                                             ID3D11Resource *pResource, FLOAT MinLOD)
 {
-	SERIALISE_ELEMENT(ResourceId, Resource, GetIDForResource(pResource));
-	SERIALISE_ELEMENT(float, MinLOD, MinLOD_);
+  SERIALISE_ELEMENT(pResource);
+  SERIALISE_ELEMENT(MinLOD);
 
-	if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(Resource))
-	{
-		m_pRealContext->SetResourceMinLOD((ID3D11Resource *)m_pDevice->GetResourceManager()->GetLiveResource(Resource), MinLOD);
-	}
+  SERIALISE_CHECK_READ_ERRORS();
 
-	return true;
+  if(IsReplayingAndReading())
+  {
+    if(pResource)
+      m_pRealContext->SetResourceMinLOD(UnwrapResource(pResource), MinLOD);
+  }
+
+  return true;
 }
 
 void WrappedID3D11DeviceContext::SetResourceMinLOD(ID3D11Resource *pResource, FLOAT MinLOD)
 {
-	m_EmptyCommandList = false;
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	if(m_State == WRITING_CAPFRAME)
-	{
-		SCOPED_SERIALISE_CONTEXT(SET_RESOURCE_MINLOD);
-		m_pSerialiser->Serialise("context", m_ResourceID);	
-		Serialise_SetResourceMinLOD(pResource, MinLOD);
+  m_EmptyCommandList = false;
 
-		m_ContextRecord->AddChunk(scope.Get());
-	}
+  SERIALISE_TIME_CALL(m_pRealContext->SetResourceMinLOD(UnwrapResource(pResource), MinLOD));
 
-	m_pRealContext->SetResourceMinLOD(m_pDevice->GetResourceManager()->UnwrapResource(pResource), MinLOD);
+  if(IsActiveCapturing(m_State))
+  {
+    USE_SCRATCH_SERIALISER();
+    SCOPED_SERIALISE_CHUNK(D3D11Chunk::SetResourceMinLOD);
+    SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+    Serialise_SetResourceMinLOD(GET_SERIALISER, pResource, MinLOD);
+
+    m_ContextRecord->AddChunk(scope.Get());
+  }
 }
 
 void WrappedID3D11DeviceContext::GetPredication(ID3D11Predicate **ppPredicate, BOOL *pPredicateValue)
 {
-	ID3D11Predicate *real = NULL;
-	m_pRealContext->GetPredication(&real, pPredicateValue);
-	SAFE_RELEASE_NOCLEAR(real);
+  ID3D11Predicate *real = NULL;
+  m_pRealContext->GetPredication(&real, pPredicateValue);
+  SAFE_RELEASE_NOCLEAR(real);
 
-	if(ppPredicate)
-	{
-		if(real)
-			*ppPredicate = UNWRAP(WrappedID3D11Predicate, real);
-		else
-			*ppPredicate = NULL;
-	}
+  if(ppPredicate)
+  {
+    if(real)
+      *ppPredicate = UNWRAP(WrappedID3D11Predicate, real);
+    else
+      *ppPredicate = NULL;
+  }
 }
 
 D3D11_DEVICE_CONTEXT_TYPE WrappedID3D11DeviceContext::GetType()
 {
-	return m_pRealContext->GetType();
+  return m_Type;
 }
 
 UINT WrappedID3D11DeviceContext::GetContextFlags()
 {
-	return m_pRealContext->GetContextFlags();
+  return m_pRealContext->GetContextFlags();
 }
 
 #pragma endregion Misc
@@ -6350,829 +7160,908 @@ UINT WrappedID3D11DeviceContext::GetContextFlags()
 
 void MapIntercept::SetAppMemory(void *appMemory)
 {
-	app.pData = appMemory;
+  app.pData = appMemory;
 }
 
 void MapIntercept::SetD3D(D3D11_SUBRESOURCE_DATA d3dData)
 {
-	D3D11_MAPPED_SUBRESOURCE d3dMap;
-	d3dMap.pData = (void *)d3dData.pSysMem;
-	d3dMap.RowPitch = d3dData.SysMemPitch;
-	d3dMap.DepthPitch = d3dData.SysMemSlicePitch;
+  D3D11_MAPPED_SUBRESOURCE d3dMap;
+  d3dMap.pData = (void *)d3dData.pSysMem;
+  d3dMap.RowPitch = d3dData.SysMemPitch;
+  d3dMap.DepthPitch = d3dData.SysMemSlicePitch;
 
-	d3d = d3dMap;
+  d3d = d3dMap;
 
-	RDCASSERT(d3d.pData);
+  RDCASSERT(d3d.pData);
 }
 
 void MapIntercept::SetD3D(D3D11_MAPPED_SUBRESOURCE d3dMap)
 {
-	d3d = d3dMap;
+  d3d = d3dMap;
 
-	RDCASSERT(d3d.pData);
+  RDCASSERT(d3d.pData);
 }
-	
+
 void MapIntercept::InitWrappedResource(ID3D11Resource *res, UINT sub, void *appMemory)
 {
-	if(WrappedID3D11Buffer::IsAlloc(res))
-		Init((ID3D11Buffer*)res, appMemory);
-	else if(WrappedID3D11Texture1D::IsAlloc(res))
-		Init((ID3D11Texture1D*)res, sub, appMemory);
-	else if(WrappedID3D11Texture2D::IsAlloc(res))
-		Init((ID3D11Texture2D*)res, sub, appMemory);
-	else if(WrappedID3D11Texture3D::IsAlloc(res))
-		Init((ID3D11Texture3D*)res, sub, appMemory);
-	else
-		RDCERR("Unexpected resource type");
+  D3D11_RESOURCE_DIMENSION dim;
+  res->GetType(&dim);
+
+  if(dim == D3D11_RESOURCE_DIMENSION_BUFFER)
+    Init((ID3D11Buffer *)res, appMemory);
+  else if(dim == D3D11_RESOURCE_DIMENSION_TEXTURE1D)
+    Init((ID3D11Texture1D *)res, sub, appMemory);
+  else if(dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+    Init((ID3D11Texture2D *)res, sub, appMemory);
+  else if(dim == D3D11_RESOURCE_DIMENSION_TEXTURE3D)
+    Init((ID3D11Texture3D *)res, sub, appMemory);
+  else
+    RDCERR("Unexpected resource type");
 }
 
 void MapIntercept::Init(ID3D11Buffer *buf, void *appMemory)
 {
-	app.pData = appMemory;
+  app.pData = appMemory;
 
-	if(buf == NULL)
-		return;
+  if(buf == NULL)
+    return;
 
-	D3D11_BUFFER_DESC desc;
-	buf->GetDesc(&desc);
-	
-	app.RowPitch = app.DepthPitch = desc.ByteWidth;
+  D3D11_BUFFER_DESC desc;
+  buf->GetDesc(&desc);
 
-	if(d3d.RowPitch == 0) 
-		d3d.RowPitch = desc.ByteWidth;
-	if(d3d.DepthPitch == 0) 
-		d3d.DepthPitch = desc.ByteWidth;
+  app.RowPitch = app.DepthPitch = desc.ByteWidth;
+
+  if(d3d.RowPitch == 0)
+    d3d.RowPitch = desc.ByteWidth;
+  if(d3d.DepthPitch == 0)
+    d3d.DepthPitch = desc.ByteWidth;
 }
 
 void MapIntercept::Init(ID3D11Texture1D *tex, UINT sub, void *appMemory)
 {
-	app.pData = appMemory;
+  app.pData = appMemory;
 
-	if(tex == NULL)
-		return;
+  if(tex == NULL)
+    return;
 
-	D3D11_TEXTURE1D_DESC desc;
-	tex->GetDesc(&desc);
+  D3D11_TEXTURE1D_DESC desc;
+  tex->GetDesc(&desc);
 
-	int width = desc.Width;
-	int height = 1;
-	int depth = 1;
-	DXGI_FORMAT fmt = desc.Format;
+  int width = desc.Width;
+  int height = 1;
+  DXGI_FORMAT fmt = desc.Format;
 
-	int mip = GetMipForSubresource(tex, sub);
+  int mip = GetMipForSubresource(tex, sub);
 
-	// a row in block formats is a row of 4x4 blocks.
-	if(IsBlockFormat(fmt))
-		numRows /= 4;
+  // a row in block formats is a row of 4x4 blocks.
+  if(IsBlockFormat(fmt))
+    numRows /= 4;
 
-	numRows = RDCMAX(1, numRows>>mip);
-	numSlices = RDCMAX(1, numSlices>>mip);
+  numRows = RDCMAX(1, numRows >> mip);
+  numSlices = RDCMAX(1, numSlices >> mip);
 
-	app.RowPitch = GetByteSize(width, 1, 1, fmt, mip);
-	app.DepthPitch = GetByteSize(width, height, 1, fmt, mip);
-	
-	if(d3d.DepthPitch == 0) 
-		d3d.DepthPitch = app.RowPitch;
-	if(d3d.DepthPitch == 0) 
-		d3d.DepthPitch = app.DepthPitch;
+  if(IsYUVPlanarFormat(fmt))
+    numRows = GetYUVNumRows(fmt, numRows);
+
+  app.RowPitch = GetRowPitch(width, fmt, mip);
+  app.DepthPitch = GetByteSize(width, height, 1, fmt, mip);
+
+  if(d3d.DepthPitch == 0)
+    d3d.DepthPitch = app.RowPitch;
+  if(d3d.DepthPitch == 0)
+    d3d.DepthPitch = app.DepthPitch;
 }
 
 void MapIntercept::Init(ID3D11Texture2D *tex, UINT sub, void *appMemory)
 {
-	app.pData = appMemory;
+  app.pData = appMemory;
 
-	if(tex == NULL)
-		return;
+  if(tex == NULL)
+    return;
 
-	D3D11_TEXTURE2D_DESC desc;
-	tex->GetDesc(&desc);
+  D3D11_TEXTURE2D_DESC desc;
+  tex->GetDesc(&desc);
 
-	int width = desc.Width;
-	int height = numRows = desc.Height;
-	int depth = 1;
-	DXGI_FORMAT fmt = desc.Format;
+  int width = desc.Width;
+  int height = numRows = desc.Height;
+  DXGI_FORMAT fmt = desc.Format;
 
-	int mip = GetMipForSubresource(tex, sub);
+  int mip = GetMipForSubresource(tex, sub);
 
-	// a row in block formats is a row of 4x4 blocks.
-	if(IsBlockFormat(fmt))
-		numRows /= 4;
+  // a row in block formats is a row of 4x4 blocks.
+  if(IsBlockFormat(fmt))
+    numRows /= 4;
 
-	numRows = RDCMAX(1, numRows>>mip);
-	numSlices = RDCMAX(1, numSlices>>mip);
+  numRows = RDCMAX(1, numRows >> mip);
+  numSlices = RDCMAX(1, numSlices >> mip);
 
-	app.RowPitch = GetByteSize(width, 1, 1, fmt, mip);
-	app.DepthPitch = GetByteSize(width, height, 1, fmt, mip);
-	
-	if(d3d.DepthPitch == 0) 
-		d3d.DepthPitch = app.DepthPitch;
+  if(IsYUVPlanarFormat(fmt))
+    numRows = GetYUVNumRows(fmt, numRows);
+
+  app.RowPitch = GetRowPitch(width, fmt, mip);
+  app.DepthPitch = GetByteSize(width, height, 1, fmt, mip);
+
+  if(d3d.DepthPitch == 0)
+    d3d.DepthPitch = app.DepthPitch;
 }
 
 void MapIntercept::Init(ID3D11Texture3D *tex, UINT sub, void *appMemory)
 {
-	app.pData = appMemory;
+  app.pData = appMemory;
 
-	if(tex == NULL)
-		return;
+  if(tex == NULL)
+    return;
 
-	D3D11_TEXTURE3D_DESC desc;
-	tex->GetDesc(&desc);
+  D3D11_TEXTURE3D_DESC desc;
+  tex->GetDesc(&desc);
 
-	int width = desc.Width;
-	int height = numRows = desc.Height;
-	int depth = numSlices = desc.Depth;
-	DXGI_FORMAT fmt = desc.Format;
+  int width = desc.Width;
+  int height = numRows = desc.Height;
+  numSlices = desc.Depth;
+  DXGI_FORMAT fmt = desc.Format;
 
-	int mip = GetMipForSubresource(tex, sub);
+  int mip = GetMipForSubresource(tex, sub);
 
-	// a row in block formats is a row of 4x4 blocks.
-	if(IsBlockFormat(fmt))
-		numRows /= 4;
+  // a row in block formats is a row of 4x4 blocks.
+  if(IsBlockFormat(fmt))
+    numRows /= 4;
 
-	numRows = RDCMAX(1, numRows>>mip);
-	numSlices = RDCMAX(1, numSlices>>mip);
+  numRows = RDCMAX(1, numRows >> mip);
+  numSlices = RDCMAX(1, numSlices >> mip);
 
-	app.RowPitch = GetByteSize(width, 1, 1, fmt, mip);
-	app.DepthPitch = GetByteSize(width, height, 1, fmt, mip);
+  if(IsYUVPlanarFormat(fmt))
+    numRows = GetYUVNumRows(fmt, numRows);
+
+  app.RowPitch = GetRowPitch(width, fmt, mip);
+  app.DepthPitch = GetByteSize(width, height, 1, fmt, mip);
 }
 
 void MapIntercept::CopyFromD3D()
 {
-	byte *sliceSrc = (byte *)d3d.pData;
-	byte *sliceDst = (byte *)app.pData;
+  byte *sliceSrc = (byte *)d3d.pData;
+  byte *sliceDst = (byte *)app.pData;
 
-	RDCASSERT(numSlices > 0 && numRows > 0 &&
-			 (numRows == 1 || (app.RowPitch > 0 && d3d.RowPitch > 0)) &&
-			 (numSlices == 1 || (app.DepthPitch > 0 && d3d.DepthPitch > 0)));
+  RDCASSERT(numSlices > 0 && numRows > 0 && (numRows == 1 || (app.RowPitch > 0 && d3d.RowPitch > 0)) &&
+            (numSlices == 1 || (app.DepthPitch > 0 && d3d.DepthPitch > 0)));
 
-	for(int slice=0; slice < numSlices; slice++)
-	{
-		byte *rowSrc = sliceSrc;
-		byte *rowDst = sliceDst;
+  for(int slice = 0; slice < numSlices; slice++)
+  {
+    byte *rowSrc = sliceSrc;
+    byte *rowDst = sliceDst;
 
-		for(int row=0; row < numRows; row++)
-		{
-			memcpy(rowDst, rowSrc, app.RowPitch);
+    for(int row = 0; row < numRows; row++)
+    {
+      memcpy(rowDst, rowSrc, app.RowPitch);
 
-			rowSrc += d3d.RowPitch;
-			rowDst += app.RowPitch;
-		}
+      rowSrc += d3d.RowPitch;
+      rowDst += app.RowPitch;
+    }
 
-		sliceSrc += d3d.DepthPitch;
-		sliceDst += app.DepthPitch;
-	}
+    sliceSrc += d3d.DepthPitch;
+    sliceDst += app.DepthPitch;
+  }
 }
 
 void MapIntercept::CopyToD3D(size_t RangeStart, size_t RangeEnd)
 {
-	byte *sliceSrc = (byte *)app.pData;
-	byte *sliceDst = (byte *)d3d.pData + RangeStart;
+  byte *sliceSrc = (byte *)app.pData;
+  byte *sliceDst = (byte *)d3d.pData + RangeStart;
 
-	RDCASSERT(numSlices > 0 && numRows > 0 &&
-			 app.RowPitch > 0 && d3d.RowPitch > 0 &&
-			 app.DepthPitch > 0 && d3d.DepthPitch > 0);
+  RDCASSERT(numSlices > 0 && numRows > 0 && app.RowPitch > 0 && d3d.RowPitch > 0 &&
+            app.DepthPitch > 0 && d3d.DepthPitch > 0);
 
-	for(int slice=0; slice < numSlices; slice++)
-	{
-		byte *rowSrc = sliceSrc;
-		byte *rowDst = sliceDst;
+  for(int slice = 0; slice < numSlices; slice++)
+  {
+    byte *rowSrc = sliceSrc;
+    byte *rowDst = sliceDst;
 
-		for(int row=0; row < numRows; row++)
-		{
-			size_t len = app.RowPitch;
+    for(int row = 0; row < numRows; row++)
+    {
+      size_t len = app.RowPitch;
 
-			if(RangeEnd > 0)
-			{
-				if(rowSrc + len > (byte *)app.pData + (RangeEnd-RangeStart))
-					len = (byte *)app.pData + (RangeEnd-RangeStart) - rowSrc;
-			}
+      if(RangeEnd > 0)
+      {
+        if(rowSrc + len > (byte *)app.pData + (RangeEnd - RangeStart))
+          len = (byte *)app.pData + (RangeEnd - RangeStart) - rowSrc;
+      }
 
-			memcpy(rowDst, rowSrc, len);
+      memcpy(rowDst, rowSrc, len);
 
-			rowSrc += app.RowPitch;
-			rowDst += d3d.RowPitch;
+      rowSrc += app.RowPitch;
+      rowDst += d3d.RowPitch;
 
-			if(RangeEnd > 0 && rowSrc > (byte *)app.pData + (RangeEnd-RangeStart))
-				return;
-		}
+      if(RangeEnd > 0 && rowSrc > (byte *)app.pData + (RangeEnd - RangeStart))
+        return;
+    }
 
-		sliceSrc += app.DepthPitch;
-		sliceDst += d3d.DepthPitch;
-	}
+    sliceSrc += app.DepthPitch;
+    sliceDst += d3d.DepthPitch;
+  }
 }
 
-bool WrappedID3D11DeviceContext::Serialise_Map(ID3D11Resource *pResource, UINT Subresource, D3D11_MAP MapType, UINT MapFlags, D3D11_MAPPED_SUBRESOURCE *pMappedResource)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_Map(SerialiserType &ser, ID3D11Resource *pResource,
+                                               UINT Subresource, D3D11_MAP MapType, UINT MapFlags,
+                                               D3D11_MAPPED_SUBRESOURCE *pMappedResource)
 {
-	D3D11_MAPPED_SUBRESOURCE mappedResource = D3D11_MAPPED_SUBRESOURCE();
+  // unused - just for the user's benefit
+  SERIALISE_ELEMENT(pResource);
+  SERIALISE_ELEMENT(Subresource);
+  SERIALISE_ELEMENT(MapType);
+  SERIALISE_ELEMENT_TYPED(D3D11_MAP_FLAG, MapFlags);
 
-	if(pMappedResource)
-		mappedResource = *pMappedResource;
+  SERIALISE_CHECK_READ_ERRORS();
 
-	D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pResource));
+  // nothing to do on replay, all the work happens in Unmap.
+  if(ser.IsReading())
+    return true;
 
-	// we only serialise out unmap - should never hit this on read.
-	RDCASSERT(m_State >= WRITING);
+  D3D11_MAPPED_SUBRESOURCE mappedResource = D3D11_MAPPED_SUBRESOURCE();
 
-	RDCASSERT(record);
+  if(pMappedResource)
+    mappedResource = *pMappedResource;
 
-	if(record->NumSubResources > (int)Subresource)
-		record = (D3D11ResourceRecord *)record->SubResources[Subresource];
+  D3D11ResourceRecord *record =
+      m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForDeviceChild(pResource));
 
-	MapIntercept intercept;	
+  RDCASSERT(record);
 
-	size_t mapLength = (size_t)record->Length;
+  if(record->NumSubResources > (int)Subresource)
+    record = (D3D11ResourceRecord *)record->SubResources[Subresource];
 
-	if(m_State == WRITING_CAPFRAME || (record && !record->DataInSerialiser))
-	{
-		ResourceId Resource = GetIDForResource(pResource);
+  MapIntercept intercept;
 
-		RDCASSERT(m_OpenMaps.find(MappedResource(Resource, Subresource)) == m_OpenMaps.end());
+  size_t mapLength = (size_t)record->Length;
 
-		ID3D11Resource *resMap = pResource;
+  if(IsActiveCapturing(m_State) || !record->DataInSerialiser)
+  {
+    ResourceId Resource = GetIDForDeviceChild(pResource);
 
-		RDCASSERT(resMap);
-		
-		int ctxMapID = 0;
+    RDCASSERT(m_OpenMaps.find(MappedResource(Resource, Subresource)) == m_OpenMaps.end());
 
-		if(GetType() == D3D11_DEVICE_CONTEXT_DEFERRED)
-		{
-			if(m_MapResourceRecordAllocs[Resource] == 0)
-				m_MapResourceRecordAllocs[Resource] = record->GetContextID();
+    ID3D11Resource *resMap = pResource;
 
-			ctxMapID = m_MapResourceRecordAllocs[Resource];
+    RDCASSERT(resMap);
 
-			RDCASSERT(ctxMapID != 0);
-		}
+    size_t ctxMapID = 0;
 
-		void *appMem = record->GetShadowPtr(ctxMapID, 0);
+    if(GetType() == D3D11_DEVICE_CONTEXT_DEFERRED)
+    {
+      if(m_MapResourceRecordAllocs[Resource] == 0)
+        m_MapResourceRecordAllocs[Resource] = record->GetContextID();
 
-		if(appMem == NULL)
-		{
-			record->AllocShadowStorage(ctxMapID, mapLength);
-			appMem = record->GetShadowPtr(ctxMapID, 0);
+      ctxMapID = m_MapResourceRecordAllocs[Resource];
 
-			if(MapType != D3D11_MAP_WRITE_DISCARD)
-			{
-				if(m_pDevice->GetResourceManager()->IsResourceDirty(Resource))
-				{
-					ID3D11DeviceChild *initial = m_pDevice->GetResourceManager()->GetInitialContents(Resource).resource;
+      RDCASSERT(ctxMapID != 0);
+    }
 
-					if(WrappedID3D11Buffer::IsAlloc(pResource))
-					{
-						RDCASSERT(initial);
+    void *appMem = record->GetShadowPtr(ctxMapID, 0);
 
-						ID3D11Buffer *stage = (ID3D11Buffer *)initial;
+    if(appMem == NULL)
+    {
+      record->AllocShadowStorage(ctxMapID, mapLength);
+      appMem = record->GetShadowPtr(ctxMapID, 0);
 
-						D3D11_MAPPED_SUBRESOURCE mapped;
-						HRESULT hr = m_pRealContext->Map(stage, 0, D3D11_MAP_READ, 0, &mapped);
+      if(MapType != D3D11_MAP_WRITE_DISCARD)
+      {
+        ID3D11DeviceChild *initial =
+            m_pDevice->GetResourceManager()->GetInitialContents(Resource).resource;
 
-						if(FAILED(hr))
-						{
-							RDCERR("Failed to map while getting initial states %08x", hr);
-						}
-						else
-						{
-							intercept = MapIntercept();
-							intercept.SetD3D(mapped);
-							intercept.Init((ID3D11Buffer *)pResource, record->GetDataPtr());
-							intercept.CopyFromD3D();
+        if(initial)
+        {
+          D3D11_RESOURCE_DIMENSION dim;
+          pResource->GetType(&dim);
 
-							RDCASSERT(mapLength == (size_t)record->Length);
+          if(dim == D3D11_RESOURCE_DIMENSION_BUFFER)
+          {
+            ID3D11Buffer *stage = (ID3D11Buffer *)initial;
 
-							memcpy(appMem, record->GetDataPtr(), mapLength);
+            D3D11_MAPPED_SUBRESOURCE mapped;
+            HRESULT hr = m_pRealContext->Map(stage, 0, D3D11_MAP_READ, 0, &mapped);
 
-							m_pRealContext->Unmap(stage, 0);
-						}
-					}
-					else
-					{
-						RDCUNIMPLEMENTED("Not getting initial contents for non-buffer GPU dirty map"); // need to get initial contents out
-						RDCERR("CORRUPTION - Invalid/inaccurate initial data for Map() - non-buffer GPU dirty data mapped");
-					}
-				}
-				else if(record->DataInSerialiser)
-				{
-					RDCASSERT(mapLength == (size_t)record->Length);
-					memcpy(appMem, record->GetDataPtr(), mapLength);
-				}
-				else
-				{
-					memset(appMem, 0, mapLength);
-				}
-			}
+            if(FAILED(hr))
+            {
+              RDCERR("Failed to map while getting initial states HRESULT: %s", ToStr(hr).c_str());
+            }
+            else
+            {
+              intercept = MapIntercept();
+              intercept.SetD3D(mapped);
+              intercept.Init((ID3D11Buffer *)pResource, record->GetDataPtr());
+              intercept.CopyFromD3D();
 
-			memcpy(record->GetShadowPtr(ctxMapID, 1), appMem, mapLength);
-		}
+              RDCASSERT(mapLength == (size_t)record->Length);
 
-		if(MapType == D3D11_MAP_WRITE_DISCARD)
-		{
-			memset(appMem, 0xcc, mapLength);
-			memcpy(record->GetShadowPtr(ctxMapID, 1), appMem, mapLength);
-		}
+              memcpy(appMem, record->GetDataPtr(), mapLength);
 
-		intercept = MapIntercept();
-		intercept.verifyWrite = (RenderDoc::Inst().GetCaptureOptions().VerifyMapWrites != 0);
-		intercept.SetD3D(mappedResource);
-		intercept.InitWrappedResource(resMap, Subresource, appMem);
-		intercept.MapType = MapType;
-		intercept.MapFlags = MapFlags;
+              m_pRealContext->Unmap(stage, 0);
+            }
+          }
+          else
+          {
+            // need to get initial contents out
+            RDCUNIMPLEMENTED("Not getting initial contents for non-buffer GPU dirty map");
+            RDCERR(
+                "CORRUPTION - Invalid/inaccurate initial data for Map() - non-buffer GPU dirty "
+                "data mapped");
+          }
+        }
+        else if(record->DataInSerialiser)
+        {
+          RDCASSERT(mapLength == (size_t)record->Length);
+          memcpy(appMem, record->GetDataPtr(), mapLength);
+        }
+        else
+        {
+          memset(appMem, 0, mapLength);
+        }
+      }
 
-		RDCASSERT(pMappedResource);
-		*pMappedResource = intercept.app;
+      memcpy(record->GetShadowPtr(ctxMapID, 1), appMem, mapLength);
+    }
 
-		m_OpenMaps[MappedResource(Resource, Subresource)] = intercept;
-	}
-	else if(m_State == WRITING_IDLE)
-	{
-		RDCASSERT(record->DataInSerialiser);
+    if(MapType == D3D11_MAP_WRITE_DISCARD)
+    {
+      if(RenderDoc::Inst().GetCaptureOptions().verifyBufferAccess)
+        memset(appMem, 0xcc, mapLength);
+      memcpy(record->GetShadowPtr(ctxMapID, 1), appMem, mapLength);
+    }
 
-		mapLength = (size_t)record->Length;
-		
-		intercept = MapIntercept();
-		intercept.verifyWrite = (RenderDoc::Inst().GetCaptureOptions().VerifyMapWrites != 0);
-		intercept.SetD3D(mappedResource);
-		intercept.MapType = MapType;
-		intercept.MapFlags = MapFlags;
+    intercept = MapIntercept();
+    intercept.verifyWrite = RenderDoc::Inst().GetCaptureOptions().verifyBufferAccess;
+    intercept.SetD3D(mappedResource);
+    intercept.InitWrappedResource(resMap, Subresource, appMem);
+    intercept.MapType = MapType;
+    intercept.MapFlags = MapFlags;
 
-		if(intercept.verifyWrite)
-		{
-			int ctxMapID = 0;
+    RDCASSERT(pMappedResource);
+    *pMappedResource = intercept.app;
 
-			ResourceId Resource = GetIDForResource(pResource);
+    m_OpenMaps[MappedResource(Resource, Subresource)] = intercept;
+  }
+  else if(IsBackgroundCapturing(m_State))
+  {
+    RDCASSERT(record->DataInSerialiser);
 
-			if(GetType() == D3D11_DEVICE_CONTEXT_DEFERRED)
-			{
-				if(m_MapResourceRecordAllocs[Resource] == 0)
-					m_MapResourceRecordAllocs[Resource] = record->GetContextID();
+    mapLength = (size_t)record->Length;
 
-				ctxMapID = m_MapResourceRecordAllocs[Resource];
+    intercept = MapIntercept();
+    intercept.verifyWrite = RenderDoc::Inst().GetCaptureOptions().verifyBufferAccess;
+    intercept.SetD3D(mappedResource);
+    intercept.MapType = MapType;
+    intercept.MapFlags = MapFlags;
 
-				RDCASSERT(ctxMapID != 0);
-			}
+    if(intercept.verifyWrite)
+    {
+      size_t ctxMapID = 0;
 
-			byte *appMem = record->GetShadowPtr(ctxMapID, 0);
+      ResourceId Resource = GetIDForDeviceChild(pResource);
 
-			if(appMem == NULL)
-			{
-				record->AllocShadowStorage(ctxMapID, mapLength);
-				appMem = record->GetShadowPtr(ctxMapID, 0);
-			}
+      if(GetType() == D3D11_DEVICE_CONTEXT_DEFERRED)
+      {
+        if(m_MapResourceRecordAllocs[Resource] == 0)
+          m_MapResourceRecordAllocs[Resource] = record->GetContextID();
 
-			memcpy(appMem, record->GetDataPtr(), mapLength);
+        ctxMapID = m_MapResourceRecordAllocs[Resource];
 
-			intercept.InitWrappedResource(pResource, Subresource, appMem);
-		}
-		else
-		{
-			intercept.InitWrappedResource(pResource, Subresource, record->GetDataPtr());
-		}
+        RDCASSERT(ctxMapID != 0);
+      }
 
-		*pMappedResource = intercept.app;
+      byte *appMem = record->GetShadowPtr(ctxMapID, 0);
 
-		m_OpenMaps[MappedResource(GetIDForResource(pResource), Subresource)] = intercept;
-	}
-	else
-	{
-		RDCERR("Unexpected and unhandled case");
-		RDCEraseEl(intercept);
-	}
+      if(appMem == NULL)
+      {
+        record->AllocShadowStorage(ctxMapID, mapLength);
+        appMem = record->GetShadowPtr(ctxMapID, 0);
+      }
 
-	// for read write fill out the buffer with what's on the mapped resource already
-	if(MapType == D3D11_MAP_READ_WRITE || MapType == D3D11_MAP_READ)
-	{
-		intercept.CopyFromD3D();
-	}
-	else if(MapType == D3D11_MAP_WRITE_DISCARD)
-	{
-		// the easy case!
-	}
-	else if(MapType == D3D11_MAP_WRITE || MapType == D3D11_MAP_WRITE_NO_OVERWRITE)
-	{
-		// For now we'll just assume that the buffer contents are perfectly accurate
-		// (which they are if no gpu writes to the buffer happens).
+      memcpy(appMem, record->GetDataPtr(), mapLength);
 
-		// could take the performance hit and just copy anyway, spec doesn't see if the
-		// data will be invalid but it will certainly be slow.
-	}
+      intercept.InitWrappedResource(pResource, Subresource, appMem);
+    }
+    else
+    {
+      intercept.InitWrappedResource(pResource, Subresource, record->GetDataPtr());
+    }
 
-	return true;
+    *pMappedResource = intercept.app;
+
+    m_OpenMaps[MappedResource(GetIDForDeviceChild(pResource), Subresource)] = intercept;
+  }
+  else
+  {
+    RDCERR("Unexpected and unhandled case");
+    RDCEraseEl(intercept);
+  }
+
+  // for read write fill out the buffer with what's on the mapped resource already
+  if(MapType == D3D11_MAP_READ_WRITE || MapType == D3D11_MAP_READ)
+  {
+    intercept.CopyFromD3D();
+  }
+  else if(MapType == D3D11_MAP_WRITE_DISCARD)
+  {
+    // the easy case!
+  }
+  else if(MapType == D3D11_MAP_WRITE || MapType == D3D11_MAP_WRITE_NO_OVERWRITE)
+  {
+    // For now we'll just assume that the buffer contents are perfectly accurate
+    // (which they are if no gpu writes to the buffer happens).
+
+    // could take the performance hit and just copy anyway, spec doesn't see if the
+    // data will be invalid but it will certainly be slow.
+  }
+
+  return true;
 }
 
-HRESULT WrappedID3D11DeviceContext::Map(ID3D11Resource *pResource, UINT Subresource, D3D11_MAP MapType, UINT MapFlags, D3D11_MAPPED_SUBRESOURCE *pMappedResource)
+HRESULT WrappedID3D11DeviceContext::Map(ID3D11Resource *pResource, UINT Subresource,
+                                        D3D11_MAP MapType, UINT MapFlags,
+                                        D3D11_MAPPED_SUBRESOURCE *pMappedResource)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
-	
-	ResourceId id = GetIDForResource(pResource);
+  DrainAnnotationQueue();
 
-	bool directMap = false;
-	if(m_HighTrafficResources.find(id) != m_HighTrafficResources.end() && m_State != WRITING_CAPFRAME)
-		directMap = true;
+  m_EmptyCommandList = false;
 
-	if(m_pDevice->GetResourceManager()->IsResourceDirty(GetIDForResource(pResource)) && m_State != WRITING_CAPFRAME)
-		directMap = true;
+  ResourceId id = GetIDForDeviceChild(pResource);
 
-	if((!directMap && MapType == D3D11_MAP_WRITE_NO_OVERWRITE && m_State != WRITING_CAPFRAME) ||
-		m_pRealContext->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED)
-	{
-		directMap = true;
-		m_HighTrafficResources.insert(id);
-		if(m_State != WRITING_CAPFRAME)
-			m_pDevice->GetResourceManager()->MarkDirtyResource(id);
-	}
+  bool directMap = false;
+  if(m_HighTrafficResources.find(id) != m_HighTrafficResources.end() && !IsActiveCapturing(m_State))
+    directMap = true;
 
-	if(directMap && m_State == WRITING_IDLE)
-	{
-		return m_pRealContext->Map(m_pDevice->GetResourceManager()->UnwrapResource(pResource), Subresource,
-										MapType, MapFlags, pMappedResource);
-	}
+  if(m_pDevice->GetResourceManager()->IsResourceDirty(GetIDForDeviceChild(pResource)) &&
+     !IsActiveCapturing(m_State))
+    directMap = true;
 
-	// can't promise no-overwrite as we're going to blat the whole buffer!
-	HRESULT ret = m_pRealContext->Map(m_pDevice->GetResourceManager()->UnwrapResource(pResource), Subresource,
-											MapType == D3D11_MAP_WRITE_NO_OVERWRITE ? D3D11_MAP_WRITE_DISCARD : MapType,
-											MapFlags, pMappedResource);
+  if((!directMap && MapType == D3D11_MAP_WRITE_NO_OVERWRITE && !IsActiveCapturing(m_State)) ||
+     GetType() == D3D11_DEVICE_CONTEXT_DEFERRED)
+  {
+    directMap = true;
+    m_HighTrafficResources.insert(id);
+    if(!IsActiveCapturing(m_State))
+      MarkDirtyResource(id);
+  }
 
-	if(SUCCEEDED(ret))
-	{
-		if(m_State == WRITING_CAPFRAME)
-		{
-			if(MapType == D3D11_MAP_READ)
-			{
-				MapIntercept intercept;
-				intercept.MapType = MapType;
-				intercept.MapFlags = MapFlags;
+  if(directMap && IsBackgroundCapturing(m_State))
+  {
+    ID3D11Resource *unwrapped = UnwrapResource(pResource);
+    return m_pRealContext->Map(unwrapped, Subresource, MapType, MapFlags, pMappedResource);
+  }
 
-				m_OpenMaps[MappedResource(GetIDForResource(pResource), Subresource)] = intercept;
-			}
-			else
-			{
-				m_MissingTracks.insert(GetIDForResource(pResource));
+  // can't promise no-overwrite as we're going to blat the whole buffer!
+  HRESULT ret;
+  SERIALISE_TIME_CALL(ret = m_pRealContext->Map(
+                          UnwrapResource(pResource), Subresource,
+                          MapType == D3D11_MAP_WRITE_NO_OVERWRITE ? D3D11_MAP_WRITE_DISCARD : MapType,
+                          MapFlags, pMappedResource));
 
-				Serialise_Map(pResource, Subresource, MapType, MapFlags, pMappedResource);
-			}
-		}
-		else if(m_State >= WRITING)
-		{
-			RDCASSERT(WrappedID3D11Buffer::IsAlloc(pResource) ||
-				WrappedID3D11Texture1D::IsAlloc(pResource) ||
-				WrappedID3D11Texture2D::IsAlloc(pResource) ||
-				WrappedID3D11Texture3D::IsAlloc(pResource));
+  if(SUCCEEDED(ret) && IsCaptureMode(m_State))
+  {
+    if(IsActiveCapturing(m_State))
+    {
+      if(MapType == D3D11_MAP_READ)
+      {
+        MapIntercept intercept;
+        intercept.MapType = MapType;
+        intercept.MapFlags = MapFlags;
 
-			ResourceId Id = GetIDForResource(pResource);
+        m_OpenMaps[MappedResource(GetIDForDeviceChild(pResource), Subresource)] = intercept;
+      }
+      else
+      {
+        GetResourceManager()->MarkDirtyResource(GetIDForDeviceChild(pResource));
 
-			D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(Id);
-			RDCASSERT(record);
+        // create a chunk purely for the user's benefit
+        USE_SCRATCH_SERIALISER();
+        SCOPED_SERIALISE_CHUNK(D3D11Chunk::Map);
+        SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+        Serialise_Map(GET_SERIALISER, pResource, Subresource, MapType, MapFlags, pMappedResource);
 
-			D3D11ResourceRecord *parent = record;
+        m_ContextRecord->AddChunk(scope.Get());
+      }
+    }
+    else    // IsIdleCapturing(m_State)
+    {
+      ResourceId Id = GetIDForDeviceChild(pResource);
 
-			if(record->NumSubResources > (int)Subresource)
-				record = (D3D11ResourceRecord *)record->SubResources[Subresource];
+      D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(Id);
+      RDCASSERT(record);
 
-			if(RenderDoc::Inst().GetCaptureOptions().VerifyMapWrites == 0)
-				record->UpdateCount++;
+      if(record->NumSubResources > (int)Subresource)
+        record = (D3D11ResourceRecord *)record->SubResources[Subresource];
 
-			if(record->UpdateCount > 60 && RenderDoc::Inst().GetCaptureOptions().VerifyMapWrites == 0)
-			{
-				m_HighTrafficResources.insert(Id);
-				m_pDevice->GetResourceManager()->MarkDirtyResource(Id);
+      record->UpdateCount++;
 
-				return ret;
-			}
+      if(record->UpdateCount > 60 && !RenderDoc::Inst().GetCaptureOptions().verifyBufferAccess)
+      {
+        m_HighTrafficResources.insert(Id);
+        MarkDirtyResource(Id);
 
-			Serialise_Map(pResource, Subresource, MapType, MapFlags, pMappedResource);
-		}
-	}
+        return ret;
+      }
 
-	return ret;
+      // don't need to create a chunk but we do need to prepare the map.
+      Serialise_Map(m_ScratchSerialiser, pResource, Subresource, MapType, MapFlags, pMappedResource);
+
+      // throw away any serialised data
+      m_ScratchSerialiser.GetWriter()->Rewind();
+    }
+  }
+
+  return ret;
 }
 
-bool WrappedID3D11DeviceContext::Serialise_Unmap(ID3D11Resource *pResource, UINT Subresource_)
+template <typename SerialiserType>
+bool WrappedID3D11DeviceContext::Serialise_Unmap(SerialiserType &ser, ID3D11Resource *pResource,
+                                                 UINT Subresource)
 {
-	MappedResource mapIdx;
-	
-	D3D11ResourceRecord *record = NULL;
+  SERIALISE_ELEMENT(pResource);
+  SERIALISE_ELEMENT(Subresource);
 
-	if(m_State >= WRITING)
-	{
-		record = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pResource));
-		RDCASSERT(record);
+  MappedResource mapIdx(GetIDForDeviceChild(pResource), Subresource);
+  MapIntercept intercept;
+  size_t ctxMapID = 0;
+  D3D11ResourceRecord *record = NULL;
 
-		if(record->NumSubResources > (int)Subresource_)
-			record = (D3D11ResourceRecord *)record->SubResources[Subresource_];
-	}
+  size_t len = 0;
+  uint32_t diffStart = 0;
+  uint32_t diffEnd = 0;
 
-	if(m_State < WRITING || m_State == WRITING_CAPFRAME || !record->DataInSerialiser)
-	{
-		SERIALISE_ELEMENT(ResourceId, Resource, GetIDForResource(pResource));
-		SERIALISE_ELEMENT(uint32_t, Subresource, Subresource_);
-		
-		mapIdx = MappedResource(Resource, Subresource);
-	}
-	else if(m_State == WRITING_IDLE)
-	{
-		mapIdx = MappedResource(GetIDForResource(pResource), Subresource_);
-	}
+  byte *MapWrittenData = NULL;
 
-	MapIntercept intercept;
-	
-	int ctxMapID = 0;
+  // handle book-keeping during capture mode
+  if(ser.IsWriting())
+  {
+    record = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForDeviceChild(pResource));
+    RDCASSERT(record);
 
-	if(m_State >= WRITING)
-	{
-		auto it = m_OpenMaps.find(mapIdx);
+    if((int)Subresource < record->NumSubResources)
+      record = (D3D11ResourceRecord *)record->SubResources[Subresource];
 
-		RDCASSERT(it != m_OpenMaps.end());
+    len = (size_t)record->Length;
+    diffEnd = (uint32_t)len;
 
-		intercept = it->second;
+    // locate the intercept data and remove it from the open maps list
+    auto it = m_OpenMaps.find(mapIdx);
 
-		m_OpenMaps.erase(it);
-		
-		if(GetType() == D3D11_DEVICE_CONTEXT_DEFERRED && (m_State == WRITING_CAPFRAME || intercept.verifyWrite))
-		{
-			ctxMapID = m_MapResourceRecordAllocs[mapIdx.resource];
+    if(it != m_OpenMaps.end())
+    {
+      intercept = it->second;
+      m_OpenMaps.erase(it);
+    }
+    else
+    {
+      RDCERR("Couldn't find map for %s/%u in open maps list", ToStr(mapIdx.resource).c_str(),
+             mapIdx.subresource);
+    }
 
-			RDCASSERT(ctxMapID != 0);
-		}
+    MapWrittenData = (byte *)intercept.app.pData;
 
-		if(intercept.verifyWrite && record)
-		{
-			if(!record->VerifyShadowStorage(ctxMapID))
-			{
-				int res = MessageBoxA(NULL,
-				                      "Breakpoint now to see callstack,\nor click 'Yes' to debugbreak.",
-				                      "Map() overwrite detected!", MB_YESNO|MB_ICONERROR);
-				if(res == IDYES)
-				{
-					OS_DEBUG_BREAK();
-				}
-			}
-		}
-	}
+    // store the context ID we used for this map's shadow pointers
+    if(GetType() == D3D11_DEVICE_CONTEXT_DEFERRED &&
+       (IsActiveCapturing(m_State) || intercept.verifyWrite))
+    {
+      ctxMapID = m_MapResourceRecordAllocs[mapIdx.resource];
 
-	if(m_State < WRITING || m_State == WRITING_CAPFRAME)
-	{
-		size_t len = record ? (size_t)record->Length : 0;
+      RDCASSERT(ctxMapID != 0);
+    }
 
-		byte *appWritePtr = NULL;
+    // if we were verifying this map, then make sure the shadow storage is still safe
+    if(intercept.verifyWrite)
+    {
+      if(!record->VerifyShadowStorage(ctxMapID))
+      {
+        rdcstr msg = StringFormat::Fmt(
+            "Overwrite of %llu byte Map()'d buffer detected\n"
+            "Breakpoint now to see callstack,\nor click 'Yes' to debugbreak.",
+            record->Length);
+        int res = tinyfd_messageBox("Map() overwrite detected!", msg.c_str(), "yesno", "error", 1);
+        if(res == 1)
+        {
+          OS_DEBUG_BREAK();
+        }
+      }
 
-		appWritePtr = (byte *)intercept.app.pData;
+      if(IsBackgroundCapturing(m_State))
+      {
+        // if there was already backing store then normally the user wrote directly into it so we
+        // don't even have to update anything, except in the case where we were verifying map
+        // writes. Then we need to copy from the verification shadow buffer into the backing store.
+        memcpy(record->GetDataPtr(), intercept.app.pData, len);
+      }
+    }
 
-		size_t diffStart = 0;
-		size_t diffEnd = len;
-		
-		if(m_State == WRITING_CAPFRAME && len > 512 && intercept.MapType != D3D11_MAP_WRITE_DISCARD)
-		{
-			bool found = FindDiffRange(appWritePtr, record->GetShadowPtr(ctxMapID, 1), len, diffStart, diffEnd);
-			if(found)
-			{
-				static size_t saved = 0;
+    // copy from the intercept buffer that the user wrote into, into D3D's real pointer
+    intercept.CopyToD3D();
 
-				saved += len - (diffEnd-diffStart);
+    // while actively capturing, on large buffers being updated, try to locate the range of data
+    // being
+    // updated and update the diffStart/diffEnd/len variables
+    if(IsActiveCapturing(m_State) && len > 512 && intercept.MapType != D3D11_MAP_WRITE_DISCARD)
+    {
+      size_t s = diffStart;
+      size_t e = diffEnd;
+      bool found = FindDiffRange(MapWrittenData, record->GetShadowPtr(ctxMapID, 1), len, s, e);
+      diffStart = (uint32_t)s;
+      diffEnd = (uint32_t)e;
 
-				RDCDEBUG("Mapped resource size %u, difference: %u -> %u. Total bytes saved so far: %u",
-								(uint32_t)len, (uint32_t)diffStart, (uint32_t)diffEnd, (uint32_t)saved);
+      D3D11_RESOURCE_DIMENSION dim;
+      pResource->GetType(&dim);
 
-				len = diffEnd-diffStart;
-			}
-			else
-			{
-				diffStart = 0;
-				diffEnd = 0;
+      // structured buffers must have copies aligned to their structure width, so we align down and
+      // up the detected diff start/end region to match.
+      if(dim == D3D11_RESOURCE_DIMENSION_BUFFER)
+      {
+        D3D11_BUFFER_DESC bufdesc = {};
+        ((WrappedID3D11Buffer *)pResource)->GetDesc(&bufdesc);
 
-				len = 1;
-			}
-		}
+        if(bufdesc.StructureByteStride)
+        {
+          diffStart -= (diffStart % bufdesc.StructureByteStride);
 
-		appWritePtr += diffStart;
-		if(m_State == WRITING_CAPFRAME && record->GetShadowPtr(ctxMapID, 1))
-		{
-			memcpy(record->GetShadowPtr(ctxMapID, 1)+diffStart, appWritePtr, diffEnd-diffStart);
-		}
-		
-		SERIALISE_ELEMENT(D3D11_MAP, MapType, intercept.MapType);
-		SERIALISE_ELEMENT(uint32_t, MapFlags, intercept.MapFlags);
+          if((diffEnd % bufdesc.StructureByteStride) != 0)
+            diffEnd += bufdesc.StructureByteStride - (diffEnd % bufdesc.StructureByteStride);
+        }
+      }
 
-		SERIALISE_ELEMENT(uint32_t, DiffStart, (uint32_t)diffStart);
-		SERIALISE_ELEMENT(uint32_t, DiffEnd, (uint32_t)diffEnd);
+      if(found)
+      {
+#if ENABLED(RDOC_DEVEL)
+        static size_t saved = 0;
 
-		if(m_State >= WRITING || m_pDevice->GetLogVersion() >= 0x000007)
-			m_pSerialiser->AlignNextBuffer(32);
+        saved += len - (diffEnd - diffStart);
 
-		m_pSerialiser->SerialiseBuffer("MapData", appWritePtr, len);
+        RDCDEBUG("Mapped resource size %u, difference: %u -> %u. Total bytes saved so far: %u",
+                 (uint32_t)len, (uint32_t)diffStart, (uint32_t)diffEnd, (uint32_t)saved);
+#endif
 
-		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(mapIdx.resource))
-		{
-			intercept.app.pData = appWritePtr;
-			
-			ID3D11Resource *res = (ID3D11Resource *)m_pDevice->GetResourceManager()->GetLiveResource(mapIdx.resource);
+        len = diffEnd - diffStart;
+      }
+      else
+      {
+        diffStart = 0;
+        diffEnd = 0;
 
-			if(DiffStart >= DiffEnd)
-			{
-				// do nothing
-			}
-			else if(MapType == D3D11_MAP_WRITE_NO_OVERWRITE)
-			{
-				RDCASSERT(WrappedID3D11Buffer::IsAlloc(res));
-				ID3D11Buffer *mapContents = NULL;
+        len = 0;
+      }
 
-				D3D11_BUFFER_DESC bdesc;
-				bdesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-				bdesc.ByteWidth = DiffEnd-DiffStart;
-				bdesc.CPUAccessFlags = 0;
-				bdesc.MiscFlags = 0;
-				bdesc.StructureByteStride = 0;
-				bdesc.Usage = D3D11_USAGE_IMMUTABLE;
+      // update the data pointer to be rebased to the start of the diff data.
+      MapWrittenData += diffStart;
+    }
 
-				D3D11_SUBRESOURCE_DATA data;
-				data.pSysMem = appWritePtr;
-				data.SysMemPitch = bdesc.ByteWidth;
-				data.SysMemSlicePitch = bdesc.ByteWidth;
+    // update shadow stores for future diff'ing
+    if(IsActiveCapturing(m_State) && record->GetShadowPtr(ctxMapID, 1))
+    {
+      memcpy(record->GetShadowPtr(ctxMapID, 1) + diffStart, MapWrittenData, diffEnd - diffStart);
+    }
+  }    // if(ser.IsWriting())
 
-				HRESULT hr = m_pDevice->GetReal()->CreateBuffer(&bdesc, &data, &mapContents);
+  // if we're not actively capturing a frame, we'll skip serialising all this data for nothing as we
+  // aren't going to save the chunk anywhere. The exception is if there's no backing store for this
+  // resource - then we need to serialise into the chunk to allocate it
+  bool SerialiseMap = ser.IsReading() || (ser.IsWriting() && IsActiveCapturing(m_State)) ||
+                      (ser.IsWriting() && !record->DataInSerialiser);
 
-				if(FAILED(hr))
-				{
-					RDCERR("Failed to create temp Unmap() buffer %08x", hr);
-				}
-				else
-				{
-					m_pRealContext->CopySubresourceRegion(m_pDevice->GetResourceManager()->UnwrapResource(res), mapIdx.subresource,
-															DiffStart, 0, 0,
-															mapContents, 0, NULL);
+  if(SerialiseMap)
+  {
+    SERIALISE_ELEMENT(intercept.MapType).Named("MapType"_lit);
+    SERIALISE_ELEMENT_TYPED(D3D11_MAP_FLAG, intercept.MapFlags).Named("MapFlags"_lit);
 
-					SAFE_RELEASE(mapContents);
-				}
-			}
-			else
-			{
-				D3D11_MAPPED_SUBRESOURCE mappedResource;
+    SERIALISE_ELEMENT(diffStart).Named("Byte offset to start of written data"_lit);
+    SERIALISE_ELEMENT(diffEnd).Named("Byte offset to end of written data"_lit);
 
-				UINT flags = MapFlags & ~D3D11_MAP_FLAG_DO_NOT_WAIT;
+    SERIALISE_ELEMENT_ARRAY(MapWrittenData, len);
 
-				HRESULT hr = m_pRealContext->Map(m_pDevice->GetResourceManager()->UnwrapResource(res), mapIdx.subresource,
-					MapType, flags, &mappedResource);
+    if(ser.IsWriting() && IsBackgroundCapturing(m_State) && !record->DataInSerialiser)
+    {
+      record->DataInSerialiser = true;
+      record->SetDataOffset(ser.GetWriter()->GetOffset() - (uint64_t)len);
+    }
+    else if(IsReplayingAndReading() && pResource)
+    {
+      // steal the allocated buffer, and manually release
+      intercept.app.pData = MapWrittenData;
+      MapWrittenData = NULL;
+    }
+  }
 
-				RDCASSERT(mappedResource.pData);
+  if(IsReplayingAndReading() && ser.IsErrored())
+  {
+    FreeAlignedBuffer(MapWrittenData);
+  }
 
-				if(FAILED(hr))
-				{
-					RDCERR("Failed to map resource, HRESULT: 0x%08x", hr);
-				}
-				else
-				{
-					intercept.SetD3D(mappedResource);
-					intercept.InitWrappedResource(res, mapIdx.subresource, appWritePtr);
+  SERIALISE_CHECK_READ_ERRORS();
 
-					intercept.CopyToD3D(DiffStart, DiffEnd);
+  if(IsReplayingAndReading() && pResource)
+  {
+    MapWrittenData = (byte *)intercept.app.pData;
 
-					m_pRealContext->Unmap(m_pDevice->GetResourceManager()->UnwrapResource(res), mapIdx.subresource);
-				}
-			}
+    if(IsLoading(m_State) && m_CurEventID > 0 && (diffStart < diffEnd))
+    {
+      RecordUpdateStats(pResource, diffEnd - diffStart, false);
 
-			SAFE_DELETE_ARRAY(appWritePtr);
-		}
-		else if(m_State == WRITING_CAPFRAME)
-		{
-			intercept.CopyToD3D();
-		}
-	}
-	else if(m_State == WRITING_IDLE)
-	{
-		size_t len = (size_t)record->Length;
+      m_ResourceUses[mapIdx.resource].push_back(EventUsage(m_CurEventID, ResourceUsage::CPUWrite));
+    }
 
-		intercept.CopyToD3D();
+    if(diffStart >= diffEnd)
+    {
+      // do nothing
+    }
+    else if(intercept.MapType == D3D11_MAP_WRITE_NO_OVERWRITE)
+    {
+      ID3D11Buffer *mapContents = NULL;
 
-		if(!record->DataInSerialiser)
-		{
-			uint32_t diffStart = 0;
-			uint32_t diffEnd = (uint32_t)len;
+      D3D11_BUFFER_DESC bdesc;
+      bdesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+      bdesc.ByteWidth = diffEnd - diffStart;
+      bdesc.CPUAccessFlags = 0;
+      bdesc.MiscFlags = 0;
+      bdesc.StructureByteStride = 0;
+      bdesc.Usage = D3D11_USAGE_IMMUTABLE;
 
-			m_pSerialiser->Serialise("MapType", intercept.MapType);
-			m_pSerialiser->Serialise("MapFlags", intercept.MapFlags);
+      D3D11_SUBRESOURCE_DATA data;
+      data.pSysMem = MapWrittenData;
+      data.SysMemPitch = bdesc.ByteWidth;
+      data.SysMemSlicePitch = bdesc.ByteWidth;
 
-			m_pSerialiser->Serialise("DiffStart", diffStart);
-			m_pSerialiser->Serialise("DiffEnd", diffEnd);
+      HRESULT hr = m_pDevice->GetReal()->CreateBuffer(&bdesc, &data, &mapContents);
 
-			// this is a bit of a hack, but to maintain backwards compatibility we have a
-			// separate function here that aligns the next serialised buffer to a 32-byte
-			// boundary in memory while writing (just skips the padding on read).
-			if(m_State >= WRITING || m_pDevice->GetLogVersion() >= 0x000007)
-				m_pSerialiser->AlignNextBuffer(32);
+      if(FAILED(hr))
+      {
+        RDCERR("Failed to create temp Unmap() buffer HRESULT: %s", ToStr(hr).c_str());
+      }
+      else
+      {
+        m_pRealContext->CopySubresourceRegion(UnwrapResource(pResource), mapIdx.subresource,
+                                              diffStart, 0, 0, mapContents, 0, NULL);
 
-			byte *buf = (byte *)intercept.app.pData;
-			m_pSerialiser->SerialiseBuffer("MapData", buf, len);
+        SAFE_RELEASE(mapContents);
+      }
+    }
+    else
+    {
+      D3D11_MAPPED_SUBRESOURCE mappedResource;
 
-			intercept.app.pData = buf;
+      UINT flags = intercept.MapFlags & ~D3D11_MAP_FLAG_DO_NOT_WAIT;
 
-			record->DataInSerialiser = true;
-			record->SetDataOffset(m_pSerialiser->GetOffset()-record->Length);
+      HRESULT hr = m_pRealContext->Map(UnwrapResource(pResource), mapIdx.subresource,
+                                       intercept.MapType, flags, &mappedResource);
 
-			if(m_State < WRITING)
-				SAFE_DELETE_ARRAY(buf);
-		}
-		else if(intercept.verifyWrite)
-		{
-			memcpy(record->GetDataPtr(), intercept.app.pData, len);
-		}
-	}
+      RDCASSERT(mappedResource.pData);
 
-	return true;
+      if(FAILED(hr))
+      {
+        RDCERR("Failed to map resource, HRESULT: %s", ToStr(hr).c_str());
+      }
+      else
+      {
+        intercept.SetD3D(mappedResource);
+        intercept.InitWrappedResource(pResource, mapIdx.subresource, MapWrittenData);
+
+        intercept.CopyToD3D(diffStart, diffEnd);
+
+        m_pRealContext->Unmap(UnwrapResource(pResource), mapIdx.subresource);
+      }
+    }
+
+    FreeAlignedBuffer(MapWrittenData);
+  }
+
+  return true;
 }
 
 void WrappedID3D11DeviceContext::Unmap(ID3D11Resource *pResource, UINT Subresource)
 {
-	DrainAnnotationQueue();
+  SCOPED_LOCK_OPTIONAL(m_pDevice->D3DLock(), m_pDevice->D3DThreadSafe());
 
-	m_EmptyCommandList = false;
+  DrainAnnotationQueue();
 
-	ResourceId id = GetIDForResource(pResource);
+  m_EmptyCommandList = false;
 
-	auto it = m_OpenMaps.find(MappedResource(id, Subresource));
+  ResourceId id = GetIDForDeviceChild(pResource);
 
-	if(m_State == WRITING_IDLE && m_HighTrafficResources.find(id) != m_HighTrafficResources.end())
-	{
-		// we intercepted this, even though we now don't need to serialise it. Time to finish what we started!
-		if(it != m_OpenMaps.end() && it->second.MapType != D3D11_MAP_READ)
-		{
-			it->second.CopyToD3D();
-			
-			D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(it->first.resource);
-			if(record) record->FreeShadowStorage();
+  auto it = m_OpenMaps.find(MappedResource(id, Subresource));
 
-			m_OpenMaps.erase(it);
-		}
-		else if(it != m_OpenMaps.end())
-		{
-			m_OpenMaps.erase(it);
-		}
-	}
-	else if(m_State >= WRITING)
-	{
-		if(it == m_OpenMaps.end() && m_State == WRITING_CAPFRAME)
-		{
-			RDCWARN("Saw an Unmap that we didn't capture the corresponding Map for - this frame is unsuccessful");
-			m_SuccessfulCapture = false;
-			m_FailureReason = CaptureFailed_UncappedUnmap;
-		}
+  if(IsBackgroundCapturing(m_State) && m_HighTrafficResources.find(id) != m_HighTrafficResources.end())
+  {
+    // we intercepted this, even though we now don't need to serialise it. Time to finish what we
+    // started!
+    if(it != m_OpenMaps.end() && it->second.MapType != D3D11_MAP_READ)
+    {
+      it->second.CopyToD3D();
 
-		if(it != m_OpenMaps.end())
-		{
-			if(it->second.MapType == D3D11_MAP_READ)
-			{
-				m_OpenMaps.erase(it);
-			}
-			else if(m_State == WRITING_CAPFRAME)
-			{
-				MarkResourceReferenced(it->first.resource, eFrameRef_Read);
-				MarkResourceReferenced(it->first.resource, eFrameRef_Write);
+      D3D11ResourceRecord *record =
+          m_pDevice->GetResourceManager()->GetResourceRecord(it->first.resource);
+      if(record)
+        record->FreeShadowStorage();
 
-				SCOPED_SERIALISE_CONTEXT(UNMAP);
-				m_pSerialiser->Serialise("context", m_ResourceID);	
-				Serialise_Unmap(pResource, Subresource);
+      m_OpenMaps.erase(it);
+    }
+    else if(it != m_OpenMaps.end())
+    {
+      m_OpenMaps.erase(it);
+    }
+  }
+  else if(IsCaptureMode(m_State))
+  {
+    if(it == m_OpenMaps.end() && IsActiveCapturing(m_State))
+    {
+      RDCWARN(
+          "Saw an Unmap that we didn't capture the corresponding Map for - this frame is "
+          "unsuccessful");
+      m_SuccessfulCapture = false;
+      m_FailureReason = CaptureFailed_UncappedUnmap;
+    }
 
-				m_ContextRecord->AddChunk(scope.Get());
-			}
-			else if(m_State >= WRITING)
-			{
-				RDCASSERT(WrappedID3D11Buffer::IsAlloc(pResource) ||
-					WrappedID3D11Texture1D::IsAlloc(pResource) ||
-					WrappedID3D11Texture2D::IsAlloc(pResource) ||
-					WrappedID3D11Texture3D::IsAlloc(pResource));
-				
-				D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pResource));
-				RDCASSERT(record);
+    if(it != m_OpenMaps.end())
+    {
+      if(it->second.MapType == D3D11_MAP_READ)
+      {
+        m_OpenMaps.erase(it);
+      }
+      else if(IsActiveCapturing(m_State))
+      {
+        MarkResourceReferenced(it->first.resource, eFrameRef_Read);
+        MarkResourceReferenced(it->first.resource, eFrameRef_PartialWrite);
 
-				D3D11ResourceRecord *parent = record;
+        USE_SCRATCH_SERIALISER();
+        SCOPED_SERIALISE_CHUNK(D3D11Chunk::Unmap);
+        SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+        Serialise_Unmap(GET_SERIALISER, pResource, Subresource);
 
-				if(record->NumSubResources > (int)Subresource)
-					record = (D3D11ResourceRecord *)record->SubResources[Subresource];
+        m_ContextRecord->AddChunk(scope.Get());
+      }
+      else    // IsIdleCapturing(m_State)
+      {
+        D3D11ResourceRecord *record =
+            m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForDeviceChild(pResource));
+        RDCASSERT(record);
 
-				if(record->DataInSerialiser)
-				{
-					Serialise_Unmap(pResource, Subresource);
-				}
-				else
-				{
-					SCOPED_SERIALISE_CONTEXT(UNMAP);
-					m_pSerialiser->Serialise("context", m_ResourceID);	
-					Serialise_Unmap(pResource, Subresource);
+        D3D11ResourceRecord *baserecord = record;
 
-					Chunk *chunk = scope.Get();
+        if(record->NumSubResources > (int)Subresource)
+          record = (D3D11ResourceRecord *)record->SubResources[Subresource];
 
-					record->AddChunk(chunk);
-					record->SetDataPtr(chunk->GetData());
+        if(record->DataInSerialiser)
+        {
+          Serialise_Unmap(m_ScratchSerialiser, pResource, Subresource);
 
-					record->DataInSerialiser = true;
-				}
+          // throw away any serialised data
+          m_ScratchSerialiser.GetWriter()->Rewind();
+        }
+        else
+        {
+          USE_SCRATCH_SERIALISER();
+          SCOPED_SERIALISE_CHUNK(D3D11Chunk::Unmap);
+          SERIALISE_ELEMENT(m_ResourceID).Named("Context"_lit).TypedAs("ID3D11DeviceContext *"_lit);
+          Serialise_Unmap(GET_SERIALISER, pResource, Subresource);
 
-				record->FreeShadowStorage();
-			}
-		}
-	}
-	
-	m_pRealContext->Unmap(m_pDevice->GetResourceManager()->UnwrapResource(pResource), Subresource);
+          Chunk *chunk = scope.Get();
+
+          baserecord->AddChunk(chunk);
+          record->SetDataPtr(chunk->GetData());
+
+          record->DataInSerialiser = true;
+        }
+
+        record->FreeShadowStorage();
+      }
+    }
+  }
+
+  m_pRealContext->Unmap(UnwrapResource(pResource), Subresource);
 }
 
 #pragma endregion Map
 
+#undef IMPLEMENT_FUNCTION_SERIALISED
+#define IMPLEMENT_FUNCTION_SERIALISED(ret, func, ...)                                       \
+  template bool WrappedID3D11DeviceContext::CONCAT(Serialise_,                              \
+                                                   func(ReadSerialiser &ser, __VA_ARGS__)); \
+  template bool WrappedID3D11DeviceContext::CONCAT(Serialise_,                              \
+                                                   func(WriteSerialiser &ser, __VA_ARGS__));
+
+SERIALISED_ID3D11CONTEXT_FUNCTIONS();
+SERIALISED_ID3D11CONTEXT_MARKER_FUNCTIONS();

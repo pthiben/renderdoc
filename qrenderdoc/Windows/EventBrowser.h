@@ -1,87 +1,146 @@
-#ifndef EVENTBROWSER_H
-#define EVENTBROWSER_H
+/******************************************************************************
+ * The MIT License (MIT)
+ *
+ * Copyright (c) 2019-2020 Baldur Karlsson
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ ******************************************************************************/
+
+#pragma once
 
 #include <QFrame>
 #include <QIcon>
+#include "Code/Interface/QRDInterface.h"
 
-#include "Code/Core.h"
-
-namespace Ui {
-	class EventBrowser;
+namespace Ui
+{
+class EventBrowser;
 }
 
-class QTreeWidgetItem;
+class QSpacerItem;
+class QToolButton;
+class RDTreeWidgetItem;
 class QTimer;
+class QTextStream;
+class FlowLayout;
+struct EventItemTag;
 
-class EventBrowser : public QFrame, public ILogViewerForm
+class EventBrowser : public QFrame, public IEventBrowser, public ICaptureViewer
 {
-	private:
-		Q_OBJECT
+private:
+  Q_OBJECT
 
-	public:
-		explicit EventBrowser(Core *core, QWidget *parent = 0);
-		~EventBrowser();
+  Q_PROPERTY(QVariant persistData READ persistData WRITE setPersistData DESIGNABLE false SCRIPTABLE false)
 
-		void OnLogfileLoaded();
-		void OnLogfileClosed();
-		void OnEventSelected(uint32_t frameID, uint32_t eventID);
+public:
+  explicit EventBrowser(ICaptureContext &ctx, QWidget *parent = 0);
+  ~EventBrowser();
 
-		private slots:
-		void on_find_clicked();
+  // IEventBrowser
+  QWidget *Widget() override { return this; }
+  void UpdateDurationColumn() override;
+  // ICaptureViewer
+  void OnCaptureLoaded() override;
+  void OnCaptureClosed() override;
+  void OnSelectedEventChanged(uint32_t eventId) override {}
+  void OnEventChanged(uint32_t eventId) override;
 
-		void on_gotoEID_clicked();
+  QVariant persistData();
+  void setPersistData(const QVariant &persistData);
 
-		void on_timeDraws_clicked();
+private slots:
+  // automatic slots
+  void on_find_clicked();
+  void on_gotoEID_clicked();
+  void on_timeDraws_clicked();
+  void on_bookmark_clicked();
+  void on_HideFindJump();
+  void on_jumpToEID_returnPressed();
+  void on_findEvent_returnPressed();
+  void on_findEvent_keyPress(QKeyEvent *event);
+  void on_findEvent_textEdited(const QString &arg1);
+  void on_events_currentItemChanged(RDTreeWidgetItem *current, RDTreeWidgetItem *previous);
+  void on_findNext_clicked();
+  void on_findPrev_clicked();
+  void on_stepNext_clicked();
+  void on_stepPrev_clicked();
+  void on_exportDraws_clicked();
+  void on_colSelect_clicked();
 
-		void on_toolButton_clicked();
+  // manual slots
+  void findHighlight_timeout();
+  void events_keyPress(QKeyEvent *event);
+  void events_contextMenu(const QPoint &pos);
 
-		void on_HideFindJump();
+public slots:
+  void clearBookmarks();
+  bool hasBookmark(uint32_t EID);
+  void toggleBookmark(uint32_t EID);
+  void jumpToBookmark(int idx);
 
-		void on_jumpToEID_returnPressed();
+private:
+  bool ShouldHide(const DrawcallDescription &drawcall);
+  QPair<uint32_t, uint32_t> AddDrawcalls(RDTreeWidgetItem *parent,
+                                         const rdcarray<DrawcallDescription> &draws);
+  void SetDrawcallTimes(RDTreeWidgetItem *node, const rdcarray<CounterResult> &results);
 
-		void on_findEvent_returnPressed();
+  void ExpandNode(RDTreeWidgetItem *node);
 
-		void on_findEvent_textEdited(const QString &arg1);
+  bool FindEventNode(RDTreeWidgetItem *&found, RDTreeWidgetItem *parent, uint32_t eventId);
+  bool SelectEvent(uint32_t eventId);
 
-		void on_events_currentItemChanged(QTreeWidgetItem *current, QTreeWidgetItem *previous);
+  void ClearFindIcons(RDTreeWidgetItem *parent);
+  void ClearFindIcons();
 
-		void on_findNext_clicked();
+  int SetFindIcons(RDTreeWidgetItem *parent, QString filter);
+  int SetFindIcons(QString filter);
 
-		void on_findPrev_clicked();
+  void repopulateBookmarks();
+  void highlightBookmarks();
+  bool hasBookmark(RDTreeWidgetItem *node);
 
-		void on_findHighlight_timeout();
+  RDTreeWidgetItem *FindNode(RDTreeWidgetItem *parent, QString filter, uint32_t after);
+  int FindEvent(RDTreeWidgetItem *parent, QString filter, uint32_t after, bool forward);
+  int FindEvent(QString filter, uint32_t after, bool forward);
+  void Find(bool forward);
 
-	private:
-		uint AddDrawcalls(QTreeWidgetItem *parent, const rdctype::array<FetchDrawcall> &draws);
-		void SetDrawcallTimes(QTreeWidgetItem *node, const rdctype::array<CounterResult> &results);
+  QString GetExportDrawcallString(int indent, bool firstchild, const DrawcallDescription &drawcall);
+  double GetDrawTime(const DrawcallDescription &drawcall);
+  void GetMaxNameLength(int &maxNameLength, int indent, bool firstchild,
+                        const DrawcallDescription &drawcall);
+  void ExportDrawcall(QTextStream &writer, int maxNameLength, int indent, bool firstchild,
+                      const DrawcallDescription &drawcall);
 
-		void ExpandNode(QTreeWidgetItem *node);
+  QPalette m_redPalette;
 
-		bool FindEventNode(QTreeWidgetItem *&found, QTreeWidgetItem *parent, uint32_t frameID, uint32_t eventID);
-		bool SelectEvent(uint32_t frameID, uint32_t eventID);
+  TimeUnit m_TimeUnit = TimeUnit::Count;
 
-		void ClearFindIcons(QTreeWidgetItem *parent);
-		void ClearFindIcons();
+  rdcarray<CounterResult> m_Times;
 
-		int SetFindIcons(QTreeWidgetItem *parent, QString filter);
-		int SetFindIcons(QString filter);
+  QTimer *m_FindHighlight;
 
-		QTreeWidgetItem *FindNode(QTreeWidgetItem *parent, QString filter, uint32_t after);
-		int FindEvent(QTreeWidgetItem *parent, QString filter, uint32_t after, bool forward);
-		int FindEvent(QString filter, uint32_t after, bool forward);
-		void Find(bool forward);
+  FlowLayout *m_BookmarkStripLayout;
+  QSpacerItem *m_BookmarkSpacer;
+  QMap<uint32_t, QToolButton *> m_BookmarkButtons;
 
-		QIcon m_CurrentIcon;
-		QIcon m_FindIcon;
-		QIcon m_BookmarkIcon;
+  void RefreshIcon(RDTreeWidgetItem *item, EventItemTag tag);
 
-		SizeDelegate *m_SizeDelegate;
-		QTimer *m_FindHighlight;
-
-		void RefreshIcon(QTreeWidgetItem *item);
-
-		Ui::EventBrowser *ui;
-		Core *m_Core;
+  Ui::EventBrowser *ui;
+  ICaptureContext &m_Ctx;
 };
-
-#endif // EVENTBROWSER_H

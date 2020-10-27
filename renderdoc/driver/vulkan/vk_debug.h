@@ -1,18 +1,18 @@
 /******************************************************************************
  * The MIT License (MIT)
- * 
- * Copyright (c) 2015-2016 Baldur Karlsson
- * 
+ *
+ * Copyright (c) 2019-2020 Baldur Karlsson
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
  * in the Software without restriction, including without limitation the rights
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -24,264 +24,167 @@
 
 #pragma once
 
+#include "core/core.h"
+#include "replay/replay_driver.h"
 #include "vk_common.h"
 #include "vk_core.h"
-#include "api/replay/renderdoc_replay.h"
-#include "replay/replay_driver.h"
-#include "core/core.h"
+#include "vk_shader_cache.h"
 
-struct TextPrintState
+struct VKMeshDisplayPipelines
 {
-	VkCommandBuffer cmd;
-	VkRenderPass rp;
-	VkFramebuffer fb;
-	uint32_t w, h;
+  enum
+  {
+    ePipe_Wire = 0,
+    ePipe_WireDepth,
+    ePipe_Solid,
+    ePipe_SolidDepth,
+    ePipe_Lit,
+    ePipe_Secondary,
+    ePipe_Count,
+  };
+
+  VkPipeline pipes[ePipe_Count] = {};
+
+  uint32_t primaryStridePadding = 0;
+  uint32_t secondaryStridePadding = 0;
 };
 
-struct MeshDisplayPipelines
-{
-	enum
-	{
-		ePipe_Wire = 0,
-		ePipe_WireDepth,
-		ePipe_Solid,
-		ePipe_SolidDepth,
-		ePipe_Lit,
-		ePipe_Secondary,
-		ePipe_Count,
-	};
+struct CopyPixelParams;
 
-	VkPipeline pipes[ePipe_Count];
-};
-
-struct VulkanPostVSData
-{
-	struct StageData
-	{
-		VkBuffer buf;
-		VkDeviceMemory bufmem;
-		VkPrimitiveTopology topo;
-
-		uint32_t numVerts;
-		uint32_t vertStride;
-		uint32_t instStride;
-
-		bool useIndices;
-		VkBuffer idxBuf;
-		VkDeviceMemory idxBufMem;
-		VkIndexType idxFmt;
-
-		bool hasPosOut;
-
-		float nearPlane;
-		float farPlane;
-	} vsin, vsout, gsout;
-
-	VulkanPostVSData()
-	{
-		RDCEraseEl(vsin);
-		RDCEraseEl(vsout);
-		RDCEraseEl(gsout);
-	}
-
-	const StageData &GetStage(MeshDataStage type)
-	{
-		if(type == eMeshDataStage_VSOut)
-			return vsout;
-		else if(type == eMeshDataStage_GSOut)
-			return gsout;
-		else
-			RDCERR("Unexpected mesh data stage!");
-
-		return vsin;
-	}
-};
+struct PixelHistoryResources;
 
 class VulkanResourceManager;
 
 class VulkanDebugManager
 {
-	public:
-		VulkanDebugManager(WrappedVulkan *driver, VkDevice dev);
-		~VulkanDebugManager();
+public:
+  VulkanDebugManager(WrappedVulkan *driver);
+  ~VulkanDebugManager();
 
-		void BeginText(const TextPrintState &textstate);
-		void RenderText(const TextPrintState &textstate, float x, float y, const char *fmt, ...);
-		void EndText(const TextPrintState &textstate);
+  void GetBufferData(ResourceId buff, uint64_t offset, uint64_t len, bytebuf &ret);
 
-		ResourceId RenderOverlay(ResourceId texid, TextureDisplayOverlay overlay, uint32_t frameID, uint32_t eventID, const vector<uint32_t> &passEvents);
+  void CopyTex2DMSToArray(VkImage destArray, VkImage srcMS, VkExtent3D extent, uint32_t layers,
+                          uint32_t samples, VkFormat fmt);
+  void CopyArrayToTex2DMS(VkImage destMS, VkImage srcArray, VkExtent3D extent, uint32_t layers,
+                          uint32_t samples, VkFormat fmt);
 
-		void InitPostVSBuffers(uint32_t frameID, uint32_t eventID);
+  void FillWithDiscardPattern(VkCommandBuffer cmd, DiscardType type, VkImage image,
+                              VkImageLayout curLayout, VkImageSubresourceRange discardRange,
+                              VkRect2D discardRect);
 
-		// indicates that EID alias is the same as frameID/eventID
-		void AliasPostVSBuffers(uint32_t frameID, uint32_t eventID, uint32_t alias) { m_PostVSAlias[alias] = eventID; }
+  void InitReadbackBuffer(VkDeviceSize sz);
+  byte *GetReadbackPtr() { return m_ReadbackPtr; }
+  VkBuffer GetReadbackBuffer() { return m_ReadbackWindow.buf; }
+  VkDeviceMemory GetReadbackMemory() { return m_ReadbackWindow.mem; }
+  VkPipelineCache GetPipelineCache() { return m_PipelineCache; }
+  VkPipeline GetCustomPipeline() { return m_Custom.TexPipeline; }
+  VkImage GetCustomTexture() { return m_Custom.TexImg; }
+  VkFramebuffer GetCustomFramebuffer() { return m_Custom.TexFB; }
+  VkRenderPass GetCustomRenderpass() { return m_Custom.TexRP; }
+  void CreateCustomShaderTex(uint32_t width, uint32_t height, uint32_t mip);
+  void CreateCustomShaderPipeline(ResourceId shader, VkPipelineLayout pipeLayout);
 
-		MeshFormat GetPostVSBuffers(uint32_t frameID, uint32_t eventID, uint32_t instID, MeshDataStage stage);
-		void GetBufferData(ResourceId buff, uint64_t offset, uint64_t len, vector<byte> &ret);
+  VKMeshDisplayPipelines CacheMeshDisplayPipelines(VkPipelineLayout pipeLayout,
+                                                   const MeshFormat &primary,
+                                                   const MeshFormat &secondary);
 
-		struct GPUBuffer
-		{
-			enum CreateFlags
-			{
-				eGPUBufferReadback = 0x1,
-				eGPUBufferVBuffer = 0x2,
-				eGPUBufferSSBO = 0x4,
-			};
-			GPUBuffer() : buf(VK_NULL_HANDLE), mem(VK_NULL_HANDLE) {}
-			void Create(WrappedVulkan *driver, VkDevice dev, VkDeviceSize size, uint32_t ringSize, uint32_t flags);
-			void Destroy(const VkLayerDispatchTable *vt, VkDevice dev);
+  void PatchOutputLocation(VkShaderModule &mod, BuiltinShader shaderType, uint32_t framebufferIndex);
+  void PatchFixedColShader(VkShaderModule &mod, float col[4]);
+  void PatchLineStripIndexBuffer(const DrawcallDescription *draw, GPUBuffer &indexBuffer,
+                                 uint32_t &indexCount);
 
-			void FillDescriptor(VkDescriptorBufferInfo &desc);
+  bool PixelHistorySetupResources(PixelHistoryResources &resources, VkImage targetImage,
+                                  VkExtent3D extent, VkFormat format, VkSampleCountFlagBits samples,
+                                  const Subresource &sub, uint32_t numEvents);
+  bool PixelHistoryDestroyResources(const PixelHistoryResources &resources);
 
-			void *Map(const VkLayerDispatchTable *vt, VkDevice dev, VkDeviceSize &bindoffset, VkDeviceSize usedsize = 0);
-			void *Map(const VkLayerDispatchTable *vt, VkDevice dev, uint32_t *bindoffset = NULL, VkDeviceSize usedsize = 0);
-			void Unmap(const VkLayerDispatchTable *vt, VkDevice dev);
+  void PixelHistoryCopyPixel(VkCommandBuffer cmd, CopyPixelParams &p, size_t offset);
 
-			VkDeviceSize sz;
-			VkBuffer buf;
-			VkDeviceMemory mem;
+  VkImageLayout GetImageLayout(ResourceId image, VkImageAspectFlagBits aspect, uint32_t mip,
+                               uint32_t slice);
 
-			// uniform buffer alignment requirement
-			VkDeviceSize align;
+  const VulkanCreationInfo::Image &GetImageInfo(ResourceId img) const;
+  const VulkanCreationInfo::ImageView &GetImageViewInfo(ResourceId imgView) const;
+  const VulkanCreationInfo::Pipeline &GetPipelineInfo(ResourceId pipe) const;
+  const VulkanCreationInfo::ShaderModule &GetShaderInfo(ResourceId shader) const;
+  const VulkanCreationInfo::Framebuffer &GetFramebufferInfo(ResourceId fb) const;
+  const VulkanCreationInfo::RenderPass &GetRenderPassInfo(ResourceId rp) const;
+  const VulkanCreationInfo::PipelineLayout &GetPipelineLayoutInfo(ResourceId pp) const;
+  const DescSetLayout &GetDescSetLayout(ResourceId dsl) const;
+  const WrappedVulkan::DescriptorSetInfo &GetDescSetInfo(ResourceId ds) const;
 
-			// for handling ring allocations
-			VkDeviceSize totalsize;
-			VkDeviceSize curoffset;
-			
-			VulkanResourceManager *GetResourceManager() { return m_ResourceManager; }
-			VulkanResourceManager *m_ResourceManager;
-		};
+private:
+  // GetBufferData
+  GPUBuffer m_ReadbackWindow;
+  byte *m_ReadbackPtr = NULL;
 
-		VkDescriptorPool m_DescriptorPool;
-		VkSampler m_LinearSampler, m_PointSampler;
+  // CacheMeshDisplayPipelines
+  std::map<uint64_t, VKMeshDisplayPipelines> m_CachedMeshPipelines;
 
-		VkDescriptorSetLayout m_CheckerboardDescSetLayout;
-		VkPipelineLayout m_CheckerboardPipeLayout;
-		VkDescriptorSet m_CheckerboardDescSet;
-		VkPipeline m_CheckerboardPipeline;
-		VkPipeline m_CheckerboardMSAAPipeline;
-		GPUBuffer m_CheckerboardUBO;
+  // CopyArrayToTex2DMS & CopyTex2DMSToArray
+  VkDescriptorPool m_ArrayMSDescriptorPool;
+  VkDescriptorSetLayout m_ArrayMSDescSetLayout = VK_NULL_HANDLE;
+  VkPipelineLayout m_ArrayMSPipeLayout = VK_NULL_HANDLE;
+  // 8 descriptor sets allows for 4x MSAA with 2 array slices, common for VR targets
+  VkDescriptorSet m_ArrayMSDescSet[8] = {};
+  VkPipeline m_Array2MSPipe = VK_NULL_HANDLE;
+  VkPipeline m_MS2ArrayPipe = VK_NULL_HANDLE;
+  VkSampler m_ArrayMSSampler = VK_NULL_HANDLE;
 
-		VkDescriptorSetLayout m_TexDisplayDescSetLayout;
-		VkPipelineLayout m_TexDisplayPipeLayout;
-		VkDescriptorSet m_TexDisplayDescSet[16]; // ring buffered to allow multiple texture renders between flushes
-		uint32_t m_TexDisplayNextSet;
-		VkPipeline m_TexDisplayPipeline, m_TexDisplayBlendPipeline, m_TexDisplayF32Pipeline;
-		GPUBuffer m_TexDisplayUBO;
+  // [0] = non-MSAA, [1] = MSAA
+  VkDeviceMemory m_DummyStencilMemory = VK_NULL_HANDLE;
+  VkImage m_DummyStencilImage[2] = {VK_NULL_HANDLE};
+  VkImageView m_DummyStencilView[2] = {VK_NULL_HANDLE};
 
-		VkDescriptorSet GetTexDisplayDescSet()
-		{
-			m_TexDisplayNextSet = (m_TexDisplayNextSet+1)%ARRAY_COUNT(m_TexDisplayDescSet);
-			return m_TexDisplayDescSet[m_TexDisplayNextSet];
-		}
+  // one per depth/stencil output format
+  VkPipeline m_DepthMS2ArrayPipe[6] = {VK_NULL_HANDLE};
+  // one per depth/stencil output format, per sample count
+  VkPipeline m_DepthArray2MSPipe[6][4] = {{VK_NULL_HANDLE}};
 
-		VkDeviceMemory m_PickPixelImageMem;
-		VkImage m_PickPixelImage;
-		VkImageView m_PickPixelImageView;
-		GPUBuffer m_PickPixelReadbackBuffer;
-		VkFramebuffer m_PickPixelFB;
-		VkRenderPass m_PickPixelRP;
-		
-		VkDescriptorSetLayout m_TextDescSetLayout;
-		VkPipelineLayout m_TextPipeLayout;
-		VkDescriptorSet m_TextDescSet;
-		VkPipeline m_TextPipeline;
-		GPUBuffer m_TextGeneralUBO;
-		GPUBuffer m_TextGlyphUBO;
-		GPUBuffer m_TextStringUBO;
-		VkImage m_TextAtlas;
-		VkDeviceMemory m_TextAtlasMem;
-		VkImageView m_TextAtlasView;
-		GPUBuffer m_TextAtlasUpload;
-		
-		VkDeviceMemory m_OverlayImageMem;
-		VkImage m_OverlayImage;
-		VkImageView m_OverlayImageView;
-		VkFramebuffer m_OverlayNoDepthFB;
-		VkRenderPass m_OverlayNoDepthRP;
-		VkExtent2D m_OverlayDim;
-		VkDeviceSize m_OverlayMemSize;
+  VkPipelineCache m_PipelineCache = VK_NULL_HANDLE;
 
-		GPUBuffer m_OverdrawRampUBO;
-		VkDescriptorSetLayout m_QuadDescSetLayout;
-		VkDescriptorSet m_QuadDescSet;
-		VkPipelineLayout m_QuadResolvePipeLayout;
-		VkPipeline m_QuadResolvePipeline;
-		vector<uint32_t> *m_QuadSPIRV;
-		
-		VkDescriptorSetLayout m_MeshDescSetLayout;
-		VkPipelineLayout m_MeshPipeLayout;
-		VkDescriptorSet m_MeshDescSet;
-		GPUBuffer m_MeshUBO, m_MeshBBoxVB, m_MeshAxisFrustumVB;
-		VkShaderModule m_MeshModules[3];
-		
-		enum TextureType
-		{
-			eTexType_1D = 1, // implicitly an array
-			eTexType_2D, // implicitly an array
-			eTexType_3D,
-			eTexType_2DMS,
-			eTexType_Max
-		};
-		
-		GPUBuffer m_MinMaxTileResult;                    // tile result buffer
-		GPUBuffer m_MinMaxResult, m_MinMaxReadback;      // Vec4f[2] final result buffer
-		GPUBuffer m_HistogramBuf, m_HistogramReadback;   // uint32_t * num buckets buffer
-		VkDescriptorSetLayout m_HistogramDescSetLayout;
-		VkPipelineLayout m_HistogramPipeLayout;
-		VkDescriptorSet m_HistogramDescSet[2];
-		GPUBuffer m_HistogramUBO;
-		VkPipeline m_HistogramPipe[eTexType_Max][3]; // float, uint, sint
-		VkPipeline m_MinMaxTilePipe[eTexType_Max][3]; // float, uint, sint
-		VkPipeline m_MinMaxResultPipe[3]; // float, uint, sint
+  struct CustomShaderRendering
+  {
+    void Destroy(WrappedVulkan *driver);
 
-		VkDescriptorSetLayout m_OutlineDescSetLayout;
-		VkPipelineLayout m_OutlinePipeLayout;
-		VkDescriptorSet m_OutlineDescSet;
-		VkPipeline m_OutlinePipeline;
-		GPUBuffer m_OutlineUBO;
-		
-		GPUBuffer m_ReadbackWindow;
-		
-		VkDescriptorSetLayout m_MeshFetchDescSetLayout;
-		VkDescriptorSet m_MeshFetchDescSet;
+    uint32_t TexWidth = 0, TexHeight = 0;
+    VkDeviceSize TexMemSize = 0;
+    VkImage TexImg = VK_NULL_HANDLE;
+    VkImageView TexImgView[16] = {VK_NULL_HANDLE};
+    VkDeviceMemory TexMem = VK_NULL_HANDLE;
+    VkFramebuffer TexFB = VK_NULL_HANDLE;
+    VkRenderPass TexRP = VK_NULL_HANDLE;
+    ResourceId TexShader;
+    VkPipeline TexPipeline = VK_NULL_HANDLE;
+  } m_Custom;
 
-		MeshDisplayPipelines CacheMeshDisplayPipelines(const MeshFormat &primary, const MeshFormat &secondary);
-		void MakeGraphicsPipelineInfo(VkGraphicsPipelineCreateInfo &pipeCreateInfo, ResourceId pipeline);
-	private:
-		void InitDebugData();
-		void ShutdownDebugData();
+  void CopyDepthTex2DMSToArray(VkImage destArray, VkImage srcMS, VkExtent3D extent, uint32_t layers,
+                               uint32_t samples, VkFormat fmt);
+  void CopyDepthArrayToTex2DMS(VkImage destMS, VkImage srcArray, VkExtent3D extent, uint32_t layers,
+                               uint32_t samples, VkFormat fmt);
 
-		VulkanResourceManager *GetResourceManager() { return m_ResourceManager; }
+  WrappedVulkan *m_pDriver = NULL;
 
-		static const uint32_t m_ShaderCacheMagic   = 0xf00d00d5;
-		static const uint32_t m_ShaderCacheVersion = 1;
+  VkDevice m_Device = VK_NULL_HANDLE;
 
-		bool m_ShaderCacheDirty, m_CacheShaders;
-		map<uint32_t, vector<uint32_t>*> m_ShaderCache;
-		
-		string GetSPIRVBlob(SPIRVShaderStage shadType, const std::vector<std::string> &sources, vector<uint32_t> **outBlob);
-		
-		void PatchFixedColShader(VkShaderModule &mod, float col[4]);
-		
-		void RenderTextInternal(const TextPrintState &textstate, float x, float y, const char *text);
-		static const uint32_t FONT_TEX_WIDTH = 256;
-		static const uint32_t FONT_TEX_HEIGHT = 128;
+  struct DiscardPassData
+  {
+    VkPipeline pso = VK_NULL_HANDLE;
+    VkRenderPass rp = VK_NULL_HANDLE;
+  };
 
-		LogState m_State;
+  struct DiscardImgData
+  {
+    rdcarray<VkImageView> views;
+    rdcarray<VkFramebuffer> fbs;
+  };
 
-		float m_FontCharAspect;
-		float m_FontCharSize;
-
-		vector<uint32_t> *m_FixedColSPIRV;
-		
-		map<uint64_t, MeshDisplayPipelines> m_CachedMeshPipelines;
-
-		map<pair<uint32_t,uint32_t>, VulkanPostVSData> m_PostVSData;
-		map<uint32_t, uint32_t> m_PostVSAlias;
-		
-		WrappedVulkan *m_pDriver;
-		VulkanResourceManager *m_ResourceManager;
-
-		VkDevice m_Device;
+  std::map<rdcpair<VkFormat, VkSampleCountFlagBits>, DiscardPassData> m_DiscardPipes;
+  std::map<ResourceId, DiscardImgData> m_DiscardImages;
+  VkDescriptorPool m_DiscardPool = VK_NULL_HANDLE;
+  VkPipelineLayout m_DiscardLayout = VK_NULL_HANDLE;
+  VkDescriptorSetLayout m_DiscardSetLayout = VK_NULL_HANDLE;
+  VkDescriptorSet m_DiscardSet[(size_t)DiscardType::Count] = {};
+  GPUBuffer m_DiscardCB[(size_t)DiscardType::Count];
+  std::map<rdcpair<VkFormat, DiscardType>, VkBuffer> m_DiscardPatterns;
 };

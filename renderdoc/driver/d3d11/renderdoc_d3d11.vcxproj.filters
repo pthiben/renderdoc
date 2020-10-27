@@ -19,6 +19,9 @@
     <Filter Include="official">
       <UniqueIdentifier>{069c5202-e850-427b-9353-250795a60436}</UniqueIdentifier>
     </Filter>
+    <Filter Include="PCH">
+      <UniqueIdentifier>{7b0b6261-46cb-4feb-8958-8252d6349ae4}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="d3d11_context1_wrap.cpp">
@@ -45,9 +48,6 @@
     <ClCompile Include="d3d11_counters.cpp">
       <Filter>Replay</Filter>
     </ClCompile>
-    <ClCompile Include="d3d11_analyse.cpp">
-      <Filter>Replay</Filter>
-    </ClCompile>
     <ClCompile Include="d3d11_resources.cpp">
       <Filter>Util</Filter>
     </ClCompile>
@@ -66,11 +66,62 @@
     <ClCompile Include="d3d11_common.cpp">
       <Filter>Util</Filter>
     </ClCompile>
-    <ClCompile Include="d3d9_hooks.cpp">
-      <Filter>Hooks</Filter>
-    </ClCompile>
     <ClCompile Include="d3d11_hooks.cpp">
       <Filter>Hooks</Filter>
+    </ClCompile>
+    <ClCompile Include="d3d11_context3_wrap.cpp">
+      <Filter>Wrapped</Filter>
+    </ClCompile>
+    <ClCompile Include="d3d11_device3_wrap.cpp">
+      <Filter>Wrapped</Filter>
+    </ClCompile>
+    <ClCompile Include="d3d11_device2_wrap.cpp">
+      <Filter>Wrapped</Filter>
+    </ClCompile>
+    <ClCompile Include="precompiled.cpp">
+      <Filter>PCH</Filter>
+    </ClCompile>
+    <ClCompile Include="d3d11_stringise.cpp">
+      <Filter>Util</Filter>
+    </ClCompile>
+    <ClCompile Include="d3d11_initstate.cpp">
+      <Filter>Common</Filter>
+    </ClCompile>
+    <ClCompile Include="d3d11_serialise.cpp">
+      <Filter>Util</Filter>
+    </ClCompile>
+    <ClCompile Include="d3d11_postvs.cpp">
+      <Filter>Replay</Filter>
+    </ClCompile>
+    <ClCompile Include="d3d11_overlay.cpp">
+      <Filter>Replay</Filter>
+    </ClCompile>
+    <ClCompile Include="d3d11_pixelhistory.cpp">
+      <Filter>Replay</Filter>
+    </ClCompile>
+    <ClCompile Include="d3d11_shaderdebug.cpp">
+      <Filter>Replay</Filter>
+    </ClCompile>
+    <ClCompile Include="d3d11_outputwindow.cpp">
+      <Filter>Replay</Filter>
+    </ClCompile>
+    <ClCompile Include="d3d11_rendermesh.cpp">
+      <Filter>Replay</Filter>
+    </ClCompile>
+    <ClCompile Include="d3d11_msaa_array_conv.cpp">
+      <Filter>Replay</Filter>
+    </ClCompile>
+    <ClCompile Include="d3d11_rendertexture.cpp">
+      <Filter>Replay</Filter>
+    </ClCompile>
+    <ClCompile Include="d3d11_rendertext.cpp">
+      <Filter>Util</Filter>
+    </ClCompile>
+    <ClCompile Include="d3d11_shader_cache.cpp">
+      <Filter>Util</Filter>
+    </ClCompile>
+    <ClCompile Include="d3d11_video.cpp">
+      <Filter>Wrapped</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -98,38 +149,41 @@
     <ClInclude Include="d3d11_common.h">
       <Filter>Util</Filter>
     </ClInclude>
-    <ClInclude Include="official\d3d11_1.h">
+    <ClInclude Include="..\dx\official\d3d11.h">
       <Filter>official</Filter>
     </ClInclude>
-    <ClInclude Include="official\d3d11_2.h">
+    <ClInclude Include="..\dx\official\d3d11_1.h">
       <Filter>official</Filter>
     </ClInclude>
-    <ClInclude Include="official\d3d11sdklayers.h">
+    <ClInclude Include="..\dx\official\d3d11_2.h">
       <Filter>official</Filter>
     </ClInclude>
-    <ClInclude Include="official\d3dcommon.h">
+    <ClInclude Include="..\dx\official\d3d11_3.h">
       <Filter>official</Filter>
     </ClInclude>
-    <ClInclude Include="official\d3dcompiler.h">
+    <ClInclude Include="..\dx\official\d3d11_4.h">
       <Filter>official</Filter>
     </ClInclude>
-    <ClInclude Include="official\dxgi.h">
+    <ClInclude Include="..\dx\official\d3d11sdklayers.h">
       <Filter>official</Filter>
     </ClInclude>
-    <ClInclude Include="official\dxgi1_2.h">
+    <ClInclude Include="..\dx\official\d3dcommon.h">
       <Filter>official</Filter>
     </ClInclude>
-    <ClInclude Include="official\dxgi1_3.h">
+    <ClInclude Include="..\dx\official\d3dcompiler.h">
       <Filter>official</Filter>
     </ClInclude>
-    <ClInclude Include="official\winapifamily.h">
-      <Filter>official</Filter>
+    <ClInclude Include="precompiled.h">
+      <Filter>PCH</Filter>
     </ClInclude>
-    <ClInclude Include="official\d3d11.h">
-      <Filter>official</Filter>
+    <ClInclude Include="d3d11_rendertext.h">
+      <Filter>Util</Filter>
     </ClInclude>
-    <ClInclude Include="official\d3d11_3.h">
-      <Filter>official</Filter>
+    <ClInclude Include="d3d11_shader_cache.h">
+      <Filter>Util</Filter>
+    </ClInclude>
+    <ClInclude Include="d3d11_video.h">
+      <Filter>Wrapped</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>

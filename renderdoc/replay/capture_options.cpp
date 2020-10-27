@@ -1,18 +1,18 @@
 /******************************************************************************
  * The MIT License (MIT)
- * 
- * Copyright (c) 2015-2016 Baldur Karlsson
- * 
+ *
+ * Copyright (c) 2019-2020 Baldur Karlsson
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
  * in the Software without restriction, including without limitation the rights
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -22,197 +22,166 @@
  * THE SOFTWARE.
  ******************************************************************************/
 
+#include "api/replay/capture_options.h"
 #include <float.h>
-
+#include "api/app/renderdoc_app.h"
 #include "common/common.h"
 #include "core/core.h"
-#include "api/replay/capture_options.h"
-#include "api/app/renderdoc_app.h"
 
 int RENDERDOC_CC SetCaptureOptionU32(RENDERDOC_CaptureOption opt, uint32_t val)
 {
-	CaptureOptions opts = RenderDoc::Inst().GetCaptureOptions();
+  CaptureOptions opts = RenderDoc::Inst().GetCaptureOptions();
 
-	switch(opt)
-	{
-		case eRENDERDOC_Option_AllowVSync:
-			opts.AllowVSync = (val != 0);
-			break;
-		case eRENDERDOC_Option_AllowFullscreen:
-			opts.AllowFullscreen = (val != 0);
-			break;
-		case eRENDERDOC_Option_DebugDeviceMode:
-			opts.DebugDeviceMode = (val != 0);
-			break;
-		case eRENDERDOC_Option_CaptureCallstacks:
-			opts.CaptureCallstacks = (val != 0);
-			break;
-		case eRENDERDOC_Option_CaptureCallstacksOnlyDraws:
-			opts.CaptureCallstacksOnlyDraws = (val != 0);
-			break;
-		case eRENDERDOC_Option_DelayForDebugger:
-			opts.DelayForDebugger = val;
-			break;
-		case eRENDERDOC_Option_VerifyMapWrites:
-			opts.VerifyMapWrites = (val != 0);
-			break;
-		case eRENDERDOC_Option_HookIntoChildren:
-			opts.HookIntoChildren = (val != 0);
-			break;
-		case eRENDERDOC_Option_RefAllResources:
-			opts.RefAllResources = (val != 0);
-			break;
-		case eRENDERDOC_Option_SaveAllInitials:
-			opts.SaveAllInitials = (val != 0);
-			break;
-		case eRENDERDOC_Option_CaptureAllCmdLists:
-			opts.CaptureAllCmdLists = (val != 0);
-			break;
-		case eRENDERDOC_Option_DebugOutputMute:
-			opts.DebugOutputMute = (val != 0);
-			break;
-		default:
-			RDCLOG("Unrecognised capture option '%d'", opt);
-			return 0;
-	}
-	
-	RenderDoc::Inst().SetCaptureOptions(opts);
-	return 1;
+  switch(opt)
+  {
+    case eRENDERDOC_Option_AllowVSync: opts.allowVSync = (val != 0); break;
+    case eRENDERDOC_Option_AllowFullscreen: opts.allowFullscreen = (val != 0); break;
+    case eRENDERDOC_Option_APIValidation: opts.apiValidation = (val != 0); break;
+    case eRENDERDOC_Option_CaptureCallstacks: opts.captureCallstacks = (val != 0); break;
+    case eRENDERDOC_Option_CaptureCallstacksOnlyDraws:
+      opts.captureCallstacksOnlyDraws = (val != 0);
+      break;
+    case eRENDERDOC_Option_DelayForDebugger: opts.delayForDebugger = val; break;
+    case eRENDERDOC_Option_VerifyBufferAccess: opts.verifyBufferAccess = (val != 0); break;
+    case eRENDERDOC_Option_HookIntoChildren: opts.hookIntoChildren = (val != 0); break;
+    case eRENDERDOC_Option_RefAllResources: opts.refAllResources = (val != 0); break;
+    case eRENDERDOC_Option_SaveAllInitials:
+      // option is deprecated
+      break;
+    case eRENDERDOC_Option_CaptureAllCmdLists: opts.captureAllCmdLists = (val != 0); break;
+    case eRENDERDOC_Option_DebugOutputMute: opts.debugOutputMute = (val != 0); break;
+    case eRENDERDOC_Option_AllowUnsupportedVendorExtensions:
+      if(val == 0x10DE)
+        RenderDoc::Inst().EnableVendorExtensions(VendorExtensions::NvAPI);
+      else
+        RDCWARN("AllowUnsupportedVendorExtensions unexpected parameter %x", val);
+      break;
+    default: RDCLOG("Unrecognised capture option '%d'", opt); return 0;
+  }
+
+  RenderDoc::Inst().SetCaptureOptions(opts);
+  return 1;
 }
 
 int RENDERDOC_CC SetCaptureOptionF32(RENDERDOC_CaptureOption opt, float val)
 {
-	CaptureOptions opts = RenderDoc::Inst().GetCaptureOptions();
+  CaptureOptions opts = RenderDoc::Inst().GetCaptureOptions();
 
-	switch(opt)
-	{
-		case eRENDERDOC_Option_AllowVSync:
-			opts.AllowVSync = (val != 0.0f);
-			break;
-		case eRENDERDOC_Option_AllowFullscreen:
-			opts.AllowFullscreen = (val != 0.0f);
-			break;
-		case eRENDERDOC_Option_DebugDeviceMode:
-			opts.DebugDeviceMode = (val != 0.0f);
-			break;
-		case eRENDERDOC_Option_CaptureCallstacks:
-			opts.CaptureCallstacks = (val != 0.0f);
-			break;
-		case eRENDERDOC_Option_CaptureCallstacksOnlyDraws:
-			opts.CaptureCallstacksOnlyDraws = (val != 0.0f);
-			break;
-		case eRENDERDOC_Option_DelayForDebugger:
-			opts.DelayForDebugger = (uint32_t)val;
-			break;
-		case eRENDERDOC_Option_VerifyMapWrites:
-			opts.VerifyMapWrites = (val != 0.0f);
-			break;
-		case eRENDERDOC_Option_HookIntoChildren:
-			opts.HookIntoChildren = (val != 0.0f);
-			break;
-		case eRENDERDOC_Option_RefAllResources:
-			opts.RefAllResources = (val != 0.0f);
-			break;
-		case eRENDERDOC_Option_SaveAllInitials:
-			opts.SaveAllInitials = (val != 0.0f);
-			break;
-		case eRENDERDOC_Option_CaptureAllCmdLists:
-			opts.CaptureAllCmdLists = (val != 0.0f);
-			break;
-		case eRENDERDOC_Option_DebugOutputMute:
-			opts.DebugOutputMute = (val != 0.0f);
-			break;
-		default:
-			RDCLOG("Unrecognised capture option '%d'", opt);
-			return 0;
-	}
-	
-	RenderDoc::Inst().SetCaptureOptions(opts);
-	return 1;
+  switch(opt)
+  {
+    case eRENDERDOC_Option_AllowVSync: opts.allowVSync = (val != 0.0f); break;
+    case eRENDERDOC_Option_AllowFullscreen: opts.allowFullscreen = (val != 0.0f); break;
+    case eRENDERDOC_Option_APIValidation: opts.apiValidation = (val != 0.0f); break;
+    case eRENDERDOC_Option_CaptureCallstacks: opts.captureCallstacks = (val != 0.0f); break;
+    case eRENDERDOC_Option_CaptureCallstacksOnlyDraws:
+      opts.captureCallstacksOnlyDraws = (val != 0.0f);
+      break;
+    case eRENDERDOC_Option_DelayForDebugger: opts.delayForDebugger = (uint32_t)val; break;
+    case eRENDERDOC_Option_VerifyBufferAccess: opts.verifyBufferAccess = (val != 0.0f); break;
+    case eRENDERDOC_Option_HookIntoChildren: opts.hookIntoChildren = (val != 0.0f); break;
+    case eRENDERDOC_Option_RefAllResources: opts.refAllResources = (val != 0.0f); break;
+    case eRENDERDOC_Option_SaveAllInitials:
+      // option is deprecated
+      break;
+    case eRENDERDOC_Option_CaptureAllCmdLists: opts.captureAllCmdLists = (val != 0.0f); break;
+    case eRENDERDOC_Option_DebugOutputMute: opts.debugOutputMute = (val != 0.0f); break;
+    case eRENDERDOC_Option_AllowUnsupportedVendorExtensions:
+      RDCWARN("AllowUnsupportedVendorExtensions unexpected parameter %f", val);
+      break;
+    default: RDCLOG("Unrecognised capture option '%d'", opt); return 0;
+  }
+
+  RenderDoc::Inst().SetCaptureOptions(opts);
+  return 1;
 }
 
 uint32_t RENDERDOC_CC GetCaptureOptionU32(RENDERDOC_CaptureOption opt)
 {
-	switch(opt)
-	{
-		case eRENDERDOC_Option_AllowVSync:
-			return (RenderDoc::Inst().GetCaptureOptions().AllowVSync ? 1 : 0);
-		case eRENDERDOC_Option_AllowFullscreen:
-			return (RenderDoc::Inst().GetCaptureOptions().AllowFullscreen ? 1 : 0);
-		case eRENDERDOC_Option_DebugDeviceMode:
-			return (RenderDoc::Inst().GetCaptureOptions().DebugDeviceMode ? 1 : 0);
-		case eRENDERDOC_Option_CaptureCallstacks:
-			return (RenderDoc::Inst().GetCaptureOptions().CaptureCallstacks ? 1 : 0);
-		case eRENDERDOC_Option_CaptureCallstacksOnlyDraws:
-			return (RenderDoc::Inst().GetCaptureOptions().CaptureCallstacksOnlyDraws ? 1 : 0);
-		case eRENDERDOC_Option_DelayForDebugger:
-			return (RenderDoc::Inst().GetCaptureOptions().DelayForDebugger);
-		case eRENDERDOC_Option_VerifyMapWrites:
-			return (RenderDoc::Inst().GetCaptureOptions().VerifyMapWrites ? 1 : 0);
-		case eRENDERDOC_Option_HookIntoChildren:
-			return (RenderDoc::Inst().GetCaptureOptions().HookIntoChildren ? 1 : 0);
-		case eRENDERDOC_Option_RefAllResources:
-			return (RenderDoc::Inst().GetCaptureOptions().RefAllResources ? 1 : 0);
-		case eRENDERDOC_Option_SaveAllInitials:
-			return (RenderDoc::Inst().GetCaptureOptions().SaveAllInitials ? 1 : 0);
-		case eRENDERDOC_Option_CaptureAllCmdLists:
-			return (RenderDoc::Inst().GetCaptureOptions().CaptureAllCmdLists ? 1 : 0);
-		case eRENDERDOC_Option_DebugOutputMute:
-			return (RenderDoc::Inst().GetCaptureOptions().DebugOutputMute ? 1 : 0);
-		default: break;
-	}
+  switch(opt)
+  {
+    case eRENDERDOC_Option_AllowVSync:
+      return (RenderDoc::Inst().GetCaptureOptions().allowVSync ? 1 : 0);
+    case eRENDERDOC_Option_AllowFullscreen:
+      return (RenderDoc::Inst().GetCaptureOptions().allowFullscreen ? 1 : 0);
+    case eRENDERDOC_Option_APIValidation:
+      return (RenderDoc::Inst().GetCaptureOptions().apiValidation ? 1 : 0);
+    case eRENDERDOC_Option_CaptureCallstacks:
+      return (RenderDoc::Inst().GetCaptureOptions().captureCallstacks ? 1 : 0);
+    case eRENDERDOC_Option_CaptureCallstacksOnlyDraws:
+      return (RenderDoc::Inst().GetCaptureOptions().captureCallstacksOnlyDraws ? 1 : 0);
+    case eRENDERDOC_Option_DelayForDebugger:
+      return (RenderDoc::Inst().GetCaptureOptions().delayForDebugger);
+    case eRENDERDOC_Option_VerifyBufferAccess:
+      return (RenderDoc::Inst().GetCaptureOptions().verifyBufferAccess ? 1 : 0);
+    case eRENDERDOC_Option_HookIntoChildren:
+      return (RenderDoc::Inst().GetCaptureOptions().hookIntoChildren ? 1 : 0);
+    case eRENDERDOC_Option_RefAllResources:
+      return (RenderDoc::Inst().GetCaptureOptions().refAllResources ? 1 : 0);
+    case eRENDERDOC_Option_SaveAllInitials:
+      // option is deprecated - always enabled
+      return 1;
+    case eRENDERDOC_Option_CaptureAllCmdLists:
+      return (RenderDoc::Inst().GetCaptureOptions().captureAllCmdLists ? 1 : 0);
+    case eRENDERDOC_Option_DebugOutputMute:
+      return (RenderDoc::Inst().GetCaptureOptions().debugOutputMute ? 1 : 0);
+    case eRENDERDOC_Option_AllowUnsupportedVendorExtensions: return 0;
+    default: break;
+  }
 
-	RDCLOG("Unrecognised capture option '%d'", opt);
-	return 0xffffffff;
+  RDCLOG("Unrecognised capture option '%d'", opt);
+  return 0xffffffff;
 }
 
 float RENDERDOC_CC GetCaptureOptionF32(RENDERDOC_CaptureOption opt)
 {
-	switch(opt)
-	{
-		case eRENDERDOC_Option_AllowVSync:
-			return (RenderDoc::Inst().GetCaptureOptions().AllowVSync ? 1.0f : 0.0f);
-		case eRENDERDOC_Option_AllowFullscreen:
-			return (RenderDoc::Inst().GetCaptureOptions().AllowFullscreen ? 1.0f : 0.0f);
-		case eRENDERDOC_Option_DebugDeviceMode:
-			return (RenderDoc::Inst().GetCaptureOptions().DebugDeviceMode ? 1.0f : 0.0f);
-		case eRENDERDOC_Option_CaptureCallstacks:
-			return (RenderDoc::Inst().GetCaptureOptions().CaptureCallstacks ? 1.0f : 0.0f);
-		case eRENDERDOC_Option_CaptureCallstacksOnlyDraws:
-			return (RenderDoc::Inst().GetCaptureOptions().CaptureCallstacksOnlyDraws ? 1.0f : 0.0f);
-		case eRENDERDOC_Option_DelayForDebugger:
-			return (RenderDoc::Inst().GetCaptureOptions().DelayForDebugger * 1.0f);
-		case eRENDERDOC_Option_VerifyMapWrites:
-			return (RenderDoc::Inst().GetCaptureOptions().VerifyMapWrites ? 1.0f : 0.0f);
-		case eRENDERDOC_Option_HookIntoChildren:
-			return (RenderDoc::Inst().GetCaptureOptions().HookIntoChildren ? 1.0f : 0.0f);
-		case eRENDERDOC_Option_RefAllResources:
-			return (RenderDoc::Inst().GetCaptureOptions().RefAllResources ? 1.0f : 0.0f);
-		case eRENDERDOC_Option_SaveAllInitials:
-			return (RenderDoc::Inst().GetCaptureOptions().SaveAllInitials ? 1.0f : 0.0f);
-		case eRENDERDOC_Option_CaptureAllCmdLists:
-			return (RenderDoc::Inst().GetCaptureOptions().CaptureAllCmdLists ? 1.0f : 0.0f);
-		case eRENDERDOC_Option_DebugOutputMute:
-			return (RenderDoc::Inst().GetCaptureOptions().DebugOutputMute ? 1.0f : 0.0f);
-		default: break;
-	}
+  switch(opt)
+  {
+    case eRENDERDOC_Option_AllowVSync:
+      return (RenderDoc::Inst().GetCaptureOptions().allowVSync ? 1.0f : 0.0f);
+    case eRENDERDOC_Option_AllowFullscreen:
+      return (RenderDoc::Inst().GetCaptureOptions().allowFullscreen ? 1.0f : 0.0f);
+    case eRENDERDOC_Option_APIValidation:
+      return (RenderDoc::Inst().GetCaptureOptions().apiValidation ? 1.0f : 0.0f);
+    case eRENDERDOC_Option_CaptureCallstacks:
+      return (RenderDoc::Inst().GetCaptureOptions().captureCallstacks ? 1.0f : 0.0f);
+    case eRENDERDOC_Option_CaptureCallstacksOnlyDraws:
+      return (RenderDoc::Inst().GetCaptureOptions().captureCallstacksOnlyDraws ? 1.0f : 0.0f);
+    case eRENDERDOC_Option_DelayForDebugger:
+      return (RenderDoc::Inst().GetCaptureOptions().delayForDebugger * 1.0f);
+    case eRENDERDOC_Option_VerifyBufferAccess:
+      return (RenderDoc::Inst().GetCaptureOptions().verifyBufferAccess ? 1.0f : 0.0f);
+    case eRENDERDOC_Option_HookIntoChildren:
+      return (RenderDoc::Inst().GetCaptureOptions().hookIntoChildren ? 1.0f : 0.0f);
+    case eRENDERDOC_Option_RefAllResources:
+      return (RenderDoc::Inst().GetCaptureOptions().refAllResources ? 1.0f : 0.0f);
+    case eRENDERDOC_Option_SaveAllInitials:
+      // option is deprecated - always enabled
+      return 1.0f;
+    case eRENDERDOC_Option_CaptureAllCmdLists:
+      return (RenderDoc::Inst().GetCaptureOptions().captureAllCmdLists ? 1.0f : 0.0f);
+    case eRENDERDOC_Option_DebugOutputMute:
+      return (RenderDoc::Inst().GetCaptureOptions().debugOutputMute ? 1.0f : 0.0f);
+    case eRENDERDOC_Option_AllowUnsupportedVendorExtensions: return 0.0f;
+    default: break;
+  }
 
-	RDCLOG("Unrecognised capture option '%d'", opt);
-	return -FLT_MAX;
+  RDCLOG("Unrecognised capture option '%d'", opt);
+  return -FLT_MAX;
 }
 
 CaptureOptions::CaptureOptions()
 {
-	AllowVSync = true;
-	AllowFullscreen = true;
-	DebugDeviceMode = false;
-	CaptureCallstacks = false;
-	CaptureCallstacksOnlyDraws = false;
-	DelayForDebugger = 0;
-	VerifyMapWrites = false;
-	HookIntoChildren = false;
-	RefAllResources = false;
-	SaveAllInitials = false;
-	CaptureAllCmdLists = false;
-	DebugOutputMute = true;
+  // since we're reading from all bytes even padding etc, memset to 0
+  RDCEraseEl(*this);
+  allowVSync = true;
+  allowFullscreen = true;
+  apiValidation = false;
+  captureCallstacks = false;
+  captureCallstacksOnlyDraws = false;
+  delayForDebugger = 0;
+  verifyBufferAccess = false;
+  hookIntoChildren = false;
+  refAllResources = false;
+  captureAllCmdLists = false;
+  debugOutputMute = true;
 }

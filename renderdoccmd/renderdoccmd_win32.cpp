@@ -1,19 +1,19 @@
 /******************************************************************************
  * The MIT License (MIT)
- * 
- * Copyright (c) 2015-2016 Baldur Karlsson
+ *
+ * Copyright (c) 2019-2020 Baldur Karlsson
  * Copyright (c) 2014 Crytek
- * 
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
  * in the Software without restriction, including without limitation the rights
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -23,685 +23,827 @@
  * THE SOFTWARE.
  ******************************************************************************/
 
+#include "renderdoccmd.h"
+#include <app/renderdoc_app.h>
+#include <renderdocshim.h>
 #include <windows.h>
 #include <string>
 #include <vector>
-
-#include <replay/renderdoc_replay.h>
-#include <app/renderdoc_app.h>
-
-#include <renderdocshim.h>
-
+#include "miniz/miniz.h"
 #include "resource.h"
 
-#include "miniz/miniz.h"
+#include <Psapi.h>
+#include <tlhelp32.h>
 
-using std::string;
-using std::wstring;
-using std::vector;
+static std::string conv(const std::wstring &str)
+{
+  std::string ret;
+  // worst case each char takes 4 bytes to encode
+  ret.resize(str.size() * 4 + 1);
+
+  WideCharToMultiByte(CP_UTF8, 0, str.c_str(), -1, &ret[0], (int)ret.size(), NULL, NULL);
+
+  ret.resize(strlen(ret.c_str()));
+
+  return ret;
+}
+
+static std::wstring conv(const std::string &str)
+{
+  std::wstring ret;
+  ret.resize(str.size() + 1);
+
+  MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &ret[0], int(ret.size() + 1));
+
+  ret.resize(wcslen(ret.c_str()));
+
+  return ret;
+}
 
 HINSTANCE hInstance = NULL;
 
-#if defined(RELEASE)
+#if defined(RELEASE) && RENDERDOC_OFFICIAL_BUILD
+#define CRASH_HANDLER 1
+#else
+#define CRASH_HANDLER 0
+#endif
+
+#if CRASH_HANDLER
 // breakpad
-#include "breakpad/common/windows/http_upload.h"
 #include "breakpad/client/windows/crash_generation/client_info.h"
 #include "breakpad/client/windows/crash_generation/crash_generation_server.h"
+#include "breakpad/common/windows/http_upload.h"
 
 using google_breakpad::ClientInfo;
 using google_breakpad::CrashGenerationServer;
 
+bool clientConnected = false;
 bool exitServer = false;
 
-static HINSTANCE CrashHandlerInst = 0;
-static HWND CrashHandlerWnd = 0;
+std::wstring wdump = L"";
+std::vector<google_breakpad::CustomInfoEntry> customInfo;
 
-bool uploadReport = false;
-bool uploadDump = false;
-bool uploadLog = false;
-string reproSteps = "";
-
-wstring dump = L"";
-vector<google_breakpad::CustomInfoEntry> customInfo;
-wstring logpath = L"";
-
-INT_PTR CALLBACK CrashHandlerProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+static void _cdecl OnClientConnected(void *context, const ClientInfo *client_info)
 {
-	switch (message)
-	{
-		case WM_INITDIALOG:
-		{
-			HANDLE hIcon = LoadImage(CrashHandlerInst, MAKEINTRESOURCE(IDI_ICON), IMAGE_ICON, 16, 16, 0);
-
-			if(hIcon)
-			{
-				SendMessage(hDlg, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
-				SendMessage(hDlg, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
-			}
-
-			SetDlgItemTextW(hDlg, IDC_WELCOMETEXT,
-				L"RenderDoc has encountered an unhandled exception or other similar unrecoverable error.\n\n" \
-				L"If you had captured but not saved a logfile it should still be available in %TEMP% and will not be deleted," \
-				L"you can try loading it again.\n\n" \
-				L"A minidump has been created and the RenderDoc diagnostic log (NOT any capture logfile) is available if you would like " \
-				L"to send them back to be analysed. The path for both is found below if you would like to inspect their contents and censor as appropriate.\n\n" \
-				L"Neither contains any significant private information, the minidump has some internal states and local memory at the time of the " \
-				L"crash & thread stacks, etc. The diagnostic log contains diagnostic messages like warnings and errors.\n\n" \
-				L"The only other information sent is the version of RenderDoc, C# exception callstack, and any notes you include.\n\n" \
-				L"Any repro steps or notes would be helpful to include with the report. If you'd like to be contacted about the bug " \
-				L"e.g. for updates about its status just include your email & name. Thank you!\n\n" \
-				L"Baldur (baldurk@baldurk.org)");
-
-			SetDlgItemTextW(hDlg, IDC_DUMPPATH, dump.c_str());
-			SetDlgItemTextW(hDlg, IDC_LOGPATH, logpath.c_str());
-
-			CheckDlgButton(hDlg, IDC_SENDDUMP, BST_CHECKED);
-			CheckDlgButton(hDlg, IDC_SENDLOG, BST_CHECKED);
-		}
-
-		case WM_SHOWWINDOW:
-		{
-
-			{
-				RECT r;
-				GetClientRect(hDlg, &r);
-
-				int xPos = (GetSystemMetrics(SM_CXSCREEN) - r.right)/2;
-				int yPos = (GetSystemMetrics(SM_CYSCREEN) - r.bottom)/2;
-
-				SetWindowPos(hDlg, NULL, xPos, yPos, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
-			}
-
-			return (INT_PTR)TRUE;
-		}
-
-		case WM_COMMAND:
-		{
-			int ID = LOWORD(wParam);
-
-			if(ID == IDC_DONTSEND)
-			{
-				EndDialog(hDlg, 0);
-				return (INT_PTR)TRUE;
-			}
-			else if(ID == IDC_SEND)
-			{
-				uploadReport = true;
-				uploadDump = (IsDlgButtonChecked(hDlg, IDC_SENDDUMP) != 0);
-				uploadLog = (IsDlgButtonChecked(hDlg, IDC_SENDLOG) != 0);
-
-				char notes[4097] = {0};
-				
-				GetDlgItemTextA(hDlg, IDC_NAME, notes, 4096);
-				notes[4096] = 0;
-
-				reproSteps = "Name: ";
-				reproSteps += notes;
-				reproSteps += "\n";
-
-				memset(notes, 0, 4096);
-				GetDlgItemTextA(hDlg, IDC_EMAIL, notes, 4096);
-				notes[4096] = 0;
-
-				reproSteps += "Email: ";
-				reproSteps += notes;
-				reproSteps += "\n\n";
-				
-				memset(notes, 0, 4096);
-				GetDlgItemTextA(hDlg, IDC_REPRO, notes, 4096);
-				notes[4096] = 0;
-
-				reproSteps += notes;
-
-				EndDialog(hDlg, 0);
-				return (INT_PTR)TRUE;
-			}
-		}
-		break;
-		
-		case WM_QUIT:
-		case WM_DESTROY:
-		case WM_CLOSE:
-		{
-			EndDialog(hDlg, 0);
-			return (INT_PTR)TRUE;
-		}
-	    break;
-	}
-	return (INT_PTR)FALSE;
+  clientConnected = true;
 }
 
-static void _cdecl OnClientCrashed(void* context, const ClientInfo* client_info, const wstring* dump_path)
+static void _cdecl OnClientCrashed(void *context, const ClientInfo *client_info,
+                                   const std::wstring *dump_path)
 {
-	if(dump_path)
-	{
-		dump = *dump_path;
+  if(dump_path)
+  {
+    wdump = *dump_path;
 
-		google_breakpad::CustomClientInfo custom = client_info->GetCustomInfo();
+    google_breakpad::CustomClientInfo custom = client_info->GetCustomInfo();
 
-		for(size_t i=0; i < custom.count; i++)
-			customInfo.push_back(custom.entries[i]);
-	}
+    for(size_t i = 0; i < custom.count; i++)
+      customInfo.push_back(custom.entries[i]);
+  }
 
-	exitServer = true;
+  exitServer = true;
 }
 
-static void _cdecl OnClientExited(void* context, const ClientInfo* client_info)
+static void _cdecl OnClientExited(void *context, const ClientInfo *client_info)
 {
-	exitServer = true;
+  exitServer = true;
 }
 #endif
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-	if(msg == WM_CLOSE)   { DestroyWindow(hwnd); return 0; }
-	if(msg == WM_DESTROY) { PostQuitMessage(0);  return 0; }
-    return DefWindowProc(hwnd, msg, wParam, lParam);
+  if(msg == WM_CLOSE)
+  {
+    DestroyWindow(hwnd);
+    return 0;
+  }
+  if(msg == WM_DESTROY)
+  {
+    PostQuitMessage(0);
+    return 0;
+  }
+  return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
-wstring GetUsername()
+void Daemonise()
 {
-	wchar_t username[256] = {0};
-	DWORD usersize = 255; 
-	GetUserNameW(username, &usersize);
-
-	return username;
+  // nothing really to do, windows version of renderdoccmd is already 'detached'
 }
 
-void DisplayRendererPreview(ReplayRenderer *renderer, TextureDisplay displayCfg)
+WindowingData DisplayRemoteServerPreview(bool active, const rdcarray<WindowingSystem> &systems)
 {
-	HWND wnd = CreateWindowEx(WS_EX_CLIENTEDGE, L"renderdoccmd", L"renderdoccmd", WS_OVERLAPPEDWINDOW,
-	                          CW_USEDEFAULT, CW_USEDEFAULT, 1280, 720, NULL, NULL, hInstance, NULL);
+  static WindowingData remoteServerPreview = {WindowingSystem::Unknown};
 
-	if(wnd == NULL)	return;
+  if(active)
+  {
+    if(remoteServerPreview.system == WindowingSystem::Unknown)
+    {
+      // if we're first initialising, create the window
 
-	ShowWindow(wnd, SW_SHOW);
-	UpdateWindow(wnd);
+      RECT wr = {0, 0, (LONG)1280, (LONG)720};
+      AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
 
-	ReplayOutput *out = ReplayRenderer_CreateOutput(renderer, wnd, eOutputType_TexDisplay);
+      HWND wnd =
+          CreateWindowEx(WS_EX_CLIENTEDGE, L"renderdoccmd", L"Remote Server Preview",
+                         WS_OVERLAPPED | WS_CAPTION | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT,
+                         wr.right - wr.left, wr.bottom - wr.top, NULL, NULL, hInstance, NULL);
 
-	OutputConfig c = { eOutputType_TexDisplay };
+      if(wnd == NULL)
+        return remoteServerPreview;
 
-	ReplayOutput_SetOutputConfig(out, c);
-	ReplayOutput_SetTextureDisplay(out, displayCfg);
+      ShowWindow(wnd, SW_SHOW);
+      UpdateWindow(wnd);
 
-	MSG msg;
-	ZeroMemory(&msg, sizeof(msg));
-	while(true)
-	{
-		// Check to see if any messages are waiting in the queue
-		while(PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
-		{
-			// Translate the message and dispatch it to WindowProc()
-			TranslateMessage(&msg);
-			DispatchMessage(&msg);
-		}
+      remoteServerPreview.system = WindowingSystem::Win32;
+      remoteServerPreview.win32.window = wnd;
+    }
+    else
+    {
+      // otherwise, pump messages
+      MSG msg;
+      ZeroMemory(&msg, sizeof(msg));
 
-		// If the message is WM_QUIT, exit the while loop
-		if(msg.message == WM_QUIT) break;
+      // Check to see if any messages are waiting in the queue
+      while(PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
+      {
+        // Translate the message and dispatch it to WindowProc()
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+      }
+    }
+  }
+  else
+  {
+    // if we had a previous window, destroy it.
+    if(remoteServerPreview.win32.window != NULL)
+      DestroyWindow(remoteServerPreview.win32.window);
 
-		// set to random event beyond the end of the frame to ensure output is marked as dirty
-		ReplayRenderer_SetFrameEvent(renderer, 0, 10000000+rand()%1000, true);
-		ReplayOutput_Display(out);
+    // reset the windowing data to 'no window'
+    remoteServerPreview = {WindowingSystem::Unknown};
+  }
 
-		Sleep(40);
-	}
-
-	DestroyWindow(wnd);
+  return remoteServerPreview;
 }
 
-int renderdoccmd(int argc, char **argv);
-bool argequal(const char *a, const char *b);
-void readCapOpts(const char *str, CaptureOptions *opts);
-
-int WINAPI wWinMain(_In_ HINSTANCE hInst,
-	_In_opt_ HINSTANCE hPrevInstance,
-	_In_ LPWSTR lpCmdLine,
-	_In_ int nShowCmd)
+void DisplayRendererPreview(IReplayController *renderer, TextureDisplay &displayCfg, uint32_t width,
+                            uint32_t height, uint32_t numLoops)
 {
-	LPWSTR *wargv;
-	int argc;
-
-	wargv = CommandLineToArgvW(GetCommandLine(), &argc);
-
-	char **argv = new char*[argc];
-
-	for(int i=0; i < argc; i++)
-	{
-		size_t len = wcslen(wargv[i]);
-		len *= 4; // worst case, every UTF-8 character takes 4 bytes
-		argv[i] = new char[len + 1];
-		argv[i][len] = 0;
-	
-		WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, &argv[i][0], (int)len+1, NULL, NULL);
-	}
-
-	LocalFree(wargv);
-
-	hInstance = hInst;
-	
-	WNDCLASSEX wc;
-	wc.cbSize        = sizeof(WNDCLASSEX);
-	wc.style         = 0;
-	wc.lpfnWndProc   = WndProc;
-	wc.cbClsExtra    = 0;
-	wc.cbWndExtra    = 0;
-	wc.hInstance     = hInstance;
-	wc.hIcon         = LoadIcon(NULL, MAKEINTRESOURCE(IDI_ICON));
-	wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
-	wc.hbrBackground = (HBRUSH)(COLOR_WINDOW+1);
-	wc.lpszMenuName  = NULL;
-	wc.lpszClassName = L"renderdoccmd";
-	wc.hIconSm       = LoadIcon(NULL, MAKEINTRESOURCE(IDI_ICON));
-
-	if(!RegisterClassEx(&wc))
-	{
-		return 1;
-	}
-
-	// special WIN32 option for launching the crash handler
-	if(argc == 3 && !_stricmp(argv[1], "--update"))
-	{
-		string originalpath = argv[2];
-		wstring wide_path;
-
-		{
-			wchar_t *conv = new wchar_t[originalpath.size()+1];
-
-			MultiByteToWideChar(CP_UTF8, 0, originalpath.c_str(), -1, conv, int(originalpath.size()+1));
-
-			wide_path = conv;
-		}
-
-		// Wait for UI to exit
-		Sleep(3000);
-
-		mz_zip_archive zip;
-		ZeroMemory(&zip, sizeof(zip));
-
-		mz_bool b = mz_zip_reader_init_file(&zip, "./update.zip", 0);
-
-		if(b)
-		{
-			mz_uint numfiles = mz_zip_reader_get_num_files(&zip);
-
-			// first create directories
-			for(mz_uint i=0; i < numfiles; i++)
-			{
-				if(mz_zip_reader_is_file_a_directory(&zip, i))
-				{
-					mz_zip_archive_file_stat zstat;
-					mz_zip_reader_file_stat(&zip, i, &zstat);
-
-					const char *fn = zstat.m_filename;
-					// skip first directory because it's RenderDoc_Version_Bitness/
-					fn = strchr(fn, '/');
-					if(fn) fn++;
-
-					if(*fn)
-					{
-						wchar_t conv[MAX_PATH] = {0};
-						wchar_t *wfn = conv;
-
-						// I know the zip only contains ASCII chars, just upcast
-						while(*fn) *(wfn++) = wchar_t(*(fn++));
-
-						wstring target = wide_path + conv;
-
-						wfn = &target[0];
-
-						// convert slashes because CreateDirectory barfs on
-						// proper slashes.
-						while(*(wfn++)) { if(*wfn == L'/') *wfn = L'\\'; }
-
-						CreateDirectoryW(target.c_str(), NULL);
-					}
-				}
-			}
-
-			for(mz_uint i=0; i < numfiles; i++)
-			{
-				if(!mz_zip_reader_is_file_a_directory(&zip, i))
-				{
-					mz_zip_archive_file_stat zstat;
-					mz_zip_reader_file_stat(&zip, i, &zstat);
-
-					const char *fn = zstat.m_filename;
-					// skip first directory because it's RenderDoc_Version_Bitness/
-					fn = strchr(fn, '/');
-					if(fn) fn++;
-
-					if(*fn)
-					{
-						wchar_t conv[MAX_PATH] = {0};
-						wchar_t *wfn = conv;
-
-						// I know the zip only contains ASCII chars, just upcast
-						while(*fn) *(wfn++) = wchar_t(*(fn++));
-
-						wstring target = wide_path + conv;
-
-						wfn = &target[0];
-
-						// convert slashes just to be consistent
-						while(*(wfn++)) { if(*wfn == L'/') *wfn = L'\\'; }
-
-						mz_zip_reader_extract_to_wfile(&zip, i, target.c_str(), 0);
-					}
-				}
-			}
-		}
-
-		// run original UI exe and tell it an update succeeded
-		wstring cmdline = L"\"";
-		cmdline += wide_path;
-		cmdline += L"/renderdocui.exe\" --updatedone";
-
-		wchar_t *paramsAlloc = new wchar_t[512];
-
-		wcscpy_s(paramsAlloc, 511, cmdline.c_str());
-
-		PROCESS_INFORMATION pi;
-		STARTUPINFOW si;
-		ZeroMemory(&pi, sizeof(pi));
-		ZeroMemory(&si, sizeof(si));
-
-		CreateProcessW(NULL, paramsAlloc, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
-
-		if(pi.dwProcessId != 0)
-		{
-			CloseHandle(pi.hProcess);
-			CloseHandle(pi.hThread);
-		}
-
-		return 0;
-	}
-
-#if defined(RELEASE)
-	CrashGenerationServer *crashServer = NULL;
-
-	// special WIN32 option for launching the crash handler
-	if(argc == 2 && !_stricmp(argv[1], "--crashhandle"))
-	{
-		wchar_t tempPath[MAX_PATH] = {0};
-		GetTempPathW(MAX_PATH-1, tempPath);
-
-		Sleep(100);
-
-		wstring dumpFolder = tempPath;
-		dumpFolder += L"RenderDocDumps";
-
-		CreateDirectoryW(dumpFolder.c_str(), NULL);
-
-		crashServer = new CrashGenerationServer(L"\\\\.\\pipe\\RenderDocBreakpadServer",
-												NULL, NULL, NULL, OnClientCrashed, NULL,
-												OnClientExited, NULL, NULL, NULL, true,
-												&dumpFolder);
-
-		if (!crashServer->Start()) {
-			delete crashServer;
-			crashServer = NULL;
-			return 1;
-		}
-
-		CrashHandlerInst = hInstance;
-		
-		CrashHandlerWnd = CreateWindowEx(WS_EX_CLIENTEDGE, L"renderdoccmd", L"renderdoccmd", WS_OVERLAPPEDWINDOW,
-			CW_USEDEFAULT, CW_USEDEFAULT, 10, 10,
-			NULL, NULL, hInstance, NULL);
-
-		HANDLE hIcon = LoadImage(CrashHandlerInst, MAKEINTRESOURCE(IDI_ICON), IMAGE_ICON, 16, 16, 0);
-
-		if(hIcon)
-		{
-			SendMessage(CrashHandlerWnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
-			SendMessage(CrashHandlerWnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
-		}
-
-		ShowWindow(CrashHandlerWnd, SW_HIDE);
-		
-		HANDLE readyEvent = CreateEventA(NULL, TRUE, FALSE, "RENDERDOC_CRASHHANDLE");
-
-		if(readyEvent != NULL)
-		{
-			SetEvent(readyEvent);
-
-			CloseHandle(readyEvent);
-		}
-
-		MSG msg;
-		ZeroMemory(&msg, sizeof(msg));
-		while(!exitServer)
-		{
-			// Check to see if any messages are waiting in the queue
-			while(PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
-			{
-				// Translate the message and dispatch it to WindowProc()
-				TranslateMessage(&msg);
-				DispatchMessage(&msg);
-			}
-
-			// If the message is WM_QUIT, exit the while loop
-			if(msg.message == WM_QUIT)
-				break;
-			
-			Sleep(100);
-		}
-		
-		delete crashServer;
-		crashServer = NULL;
-
-		if(!dump.empty())
-		{
-			logpath = L"";
-
-			string report = "";
-
-			for(size_t i=0; i < customInfo.size(); i++)
-			{
-				wstring name = customInfo[i].name;
-				wstring val = customInfo[i].value;
-
-				if(name == L"logpath")
-				{
-					logpath = val;
-				}
-				else if(name == L"ptime")
-				{
-					// breakpad uptime, ignore.
-				}
-				else
-				{
-					report += string(name.begin(), name.end()) + ": " + string(val.begin(), val.end()) + "\n";
-				}
-			}
-
-			DialogBox(CrashHandlerInst, MAKEINTRESOURCE(IDD_CRASH_HANDLER), CrashHandlerWnd, (DLGPROC)CrashHandlerProc);
-			
-			report += "\n\nRepro steps/Notes:\n\n" + reproSteps;
-
-			{
-				FILE *f = NULL;
-				_wfopen_s(&f, logpath.c_str(), L"r");
-				if(f)
-				{
-					fseek(f, 0, SEEK_END);
-					long filesize = ftell(f);
-					fseek(f, 0, SEEK_SET);
-
-					if(filesize > 10)
-					{
-						char *error_log = new char[filesize+1];
-						memset(error_log, 0, filesize+1);
-
-						fread(error_log, 1, filesize, f);
-
-						char *managed_callstack = strstr(error_log, "--- Begin C# Exception Data ---");
-						if(managed_callstack)
-						{
-							report += managed_callstack;
-							report += "\n\n";
-						}
-
-						delete[] error_log;
-					}
-					
-					fclose(f);
-				}
-			}
-
-			if(uploadReport)
-			{
-				mz_zip_archive zip;
-				ZeroMemory(&zip, sizeof(zip));
-
-				wstring destzip = dumpFolder + L"\\report.zip";
-
-				DeleteFileW(destzip.c_str());
-
-				mz_zip_writer_init_wfile(&zip, destzip.c_str(), 0);
-				mz_zip_writer_add_mem(&zip, "report.txt", report.c_str(), report.length(), MZ_BEST_COMPRESSION);
-
-				if(uploadDump && !dump.empty())
-					mz_zip_writer_add_wfile(&zip, "minidump.dmp", dump.c_str(), NULL, 0, MZ_BEST_COMPRESSION);
-
-				if(uploadLog && !logpath.empty())
-					mz_zip_writer_add_wfile(&zip, "error.log", logpath.c_str(), NULL, 0, MZ_BEST_COMPRESSION);
-
-				mz_zip_writer_finalize_archive(&zip);
-				mz_zip_writer_end(&zip);
-
-				int timeout = 10000;
-				wstring body = L"";
-				int code = 0;
-
-				std::map<wstring, wstring> params;
-
-				google_breakpad::HTTPUpload::SendRequest(L"http://renderdoc.org/bugsubmit", params,
-					dumpFolder + L"\\report.zip", L"report", &timeout, &body, &code);
-
-				DeleteFileW(destzip.c_str());
-			}
-		}
-
-		if(!dump.empty())
-			DeleteFileW(dump.c_str());
-
-		if(!logpath.empty())
-			DeleteFileW(logpath.c_str());
-
-		return 0;
-	}
+  RECT wr = {0, 0, (LONG)width, (LONG)height};
+  AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
+
+  HWND wnd = CreateWindowEx(WS_EX_CLIENTEDGE, L"renderdoccmd", L"renderdoccmd", WS_OVERLAPPEDWINDOW,
+                            CW_USEDEFAULT, CW_USEDEFAULT, wr.right - wr.left, wr.bottom - wr.top,
+                            NULL, NULL, hInstance, NULL);
+
+  if(wnd == NULL)
+    return;
+
+  ShowWindow(wnd, SW_SHOW);
+  UpdateWindow(wnd);
+
+  IReplayOutput *out =
+      renderer->CreateOutput(CreateWin32WindowingData(wnd), ReplayOutputType::Texture);
+
+  out->SetTextureDisplay(displayCfg);
+
+  uint32_t loopCount = 0;
+
+  MSG msg;
+  ZeroMemory(&msg, sizeof(msg));
+  while(true)
+  {
+    // Check to see if any messages are waiting in the queue
+    while(PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
+    {
+      // Translate the message and dispatch it to WindowProc()
+      TranslateMessage(&msg);
+      DispatchMessage(&msg);
+    }
+
+    // If the message is WM_QUIT, exit the while loop
+    if(msg.message == WM_QUIT)
+      break;
+
+    // set to random event beyond the end of the frame to ensure output is marked as dirty
+    renderer->SetFrameEvent(10000000, true);
+    out->Display();
+
+    Sleep(40);
+
+    loopCount++;
+
+    if(numLoops > 0 && loopCount == numLoops)
+      break;
+  }
+
+  DestroyWindow(wnd);
+}
+
+struct UpgradeCommand : public Command
+{
+private:
+  std::wstring wide_path;
+
+public:
+  UpgradeCommand() {}
+  virtual void AddOptions(cmdline::parser &parser) { parser.add<std::string>("path", 0, ""); }
+  virtual const char *Description() { return "Internal use only!"; }
+  virtual bool IsInternalOnly() { return true; }
+  virtual bool IsCaptureCommand() { return false; }
+  virtual bool Parse(cmdline::parser &parser, GlobalEnvironment &)
+  {
+    wide_path = conv(parser.get<std::string>("path"));
+    return true;
+  }
+
+  virtual int Execute(const CaptureOptions &)
+  {
+    if(wide_path.back() != '\\' && wide_path.back() != '/')
+      wide_path += L'\\';
+
+    // Wait for UI to exit
+    Sleep(3000);
+
+    mz_zip_archive zip;
+    ZeroMemory(&zip, sizeof(zip));
+
+    bool successful = false;
+    std::wstring failReason = L"\"Unknown error\"";
+
+    mz_bool b = mz_zip_reader_init_file(&zip, "./update.zip", 0);
+
+    if(b)
+    {
+      mz_uint numfiles = mz_zip_reader_get_num_files(&zip);
+
+      // first create directories
+      for(mz_uint i = 0; i < numfiles; i++)
+      {
+        if(mz_zip_reader_is_file_a_directory(&zip, i))
+        {
+          mz_zip_archive_file_stat zstat;
+          mz_zip_reader_file_stat(&zip, i, &zstat);
+
+          const char *fn = zstat.m_filename;
+          // skip first directory because it's RenderDoc_Version_Bitness/
+          fn = strchr(fn, '/');
+          if(fn)
+            fn++;
+
+          if(fn && *fn)
+          {
+            wchar_t conv[MAX_PATH] = {0};
+            wchar_t *wfn = conv;
+
+            // I know the zip only contains ASCII chars, just upcast
+            while(*fn)
+              *(wfn++) = wchar_t(*(fn++));
+
+            std::wstring target = wide_path + conv;
+
+            wfn = &target[0];
+
+            // convert slashes because CreateDirectory barfs on
+            // proper slashes.
+            while(*(wfn++))
+            {
+              if(*wfn == L'/')
+                *wfn = L'\\';
+            }
+
+            CreateDirectoryW(target.c_str(), NULL);
+          }
+        }
+      }
+
+      // next make sure we can get read+write access to every file. If not
+      // one might be in use, but we definitely can't update it
+      successful = true;
+
+      for(mz_uint i = 0; successful && i < numfiles; i++)
+      {
+        if(!mz_zip_reader_is_file_a_directory(&zip, i))
+        {
+          mz_zip_archive_file_stat zstat;
+          mz_zip_reader_file_stat(&zip, i, &zstat);
+
+          const char *fn = zstat.m_filename;
+          // skip first directory because it's RenderDoc_Version_Bitness/
+          fn = strchr(fn, '/');
+          if(fn)
+            fn++;
+
+          if(fn && *fn)
+          {
+            wchar_t conv[MAX_PATH] = {0};
+            wchar_t *wfn = conv;
+
+            // I know the zip only contains ASCII chars, just upcast
+            while(*fn)
+              *(wfn++) = wchar_t(*(fn++));
+
+            std::wstring target = wide_path + conv;
+
+            wfn = &target[0];
+
+            // convert slashes just to be consistent
+            while(*(wfn++))
+            {
+              if(*wfn == L'/')
+                *wfn = L'\\';
+            }
+
+            FILE *f = NULL;
+            _wfopen_s(&f, target.c_str(), L"a+");
+            if(!f)
+            {
+              failReason = L"\"Couldn't modify an install file - likely file is in use.\"";
+              successful = false;
+            }
+            else
+            {
+              fclose(f);
+            }
+          }
+        }
+      }
+
+      for(mz_uint i = 0; successful && i < numfiles; i++)
+      {
+        if(!mz_zip_reader_is_file_a_directory(&zip, i))
+        {
+          mz_zip_archive_file_stat zstat;
+          mz_zip_reader_file_stat(&zip, i, &zstat);
+
+          const char *fn = zstat.m_filename;
+          // skip first directory because it's RenderDoc_Version_Bitness/
+          fn = strchr(fn, '/');
+          if(fn)
+            fn++;
+
+          if(fn && *fn)
+          {
+            wchar_t conv[MAX_PATH] = {0};
+            wchar_t *wfn = conv;
+
+            // I know the zip only contains ASCII chars, just upcast
+            while(*fn)
+              *(wfn++) = wchar_t(*(fn++));
+
+            std::wstring target = wide_path + conv;
+
+            wfn = &target[0];
+
+            // convert slashes just to be consistent
+            while(*(wfn++))
+            {
+              if(*wfn == L'/')
+                *wfn = L'\\';
+            }
+
+            FILE *target_file = NULL;
+            _wfopen_s(&target_file, target.c_str(), L"wb");
+            if(target_file)
+            {
+              mz_zip_reader_extract_to_cfile(&zip, i, target_file, 0);
+              fclose(target_file);
+            }
+          }
+        }
+      }
+    }
+    else
+    {
+      failReason = L"\"Failed to open update .zip file - possibly corrupted.\"";
+    }
+
+    // run original UI exe and tell it an update succeeded
+    std::wstring cmdline = L"\"";
+    cmdline += wide_path;
+    cmdline += L"/qrenderdoc.exe\" ";
+    if(successful)
+      cmdline += L"--updatedone";
+    else
+      cmdline += L"--updatefailed " + failReason;
+
+    wchar_t *paramsAlloc = new wchar_t[512];
+
+    ZeroMemory(paramsAlloc, sizeof(wchar_t) * 512);
+
+    wcscpy_s(paramsAlloc, 511, cmdline.c_str());
+
+    PROCESS_INFORMATION pi;
+    STARTUPINFOW si;
+    ZeroMemory(&pi, sizeof(pi));
+    ZeroMemory(&si, sizeof(si));
+
+    CreateProcessW(NULL, paramsAlloc, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+
+    if(pi.dwProcessId != 0)
+    {
+      CloseHandle(pi.hProcess);
+      CloseHandle(pi.hThread);
+    }
+
+    delete[] paramsAlloc;
+
+    return 0;
+  }
+};
+
+#if CRASH_HANDLER
+struct CrashHandlerCommand : public Command
+{
+private:
+  std::wstring pipe;
+
+public:
+  CrashHandlerCommand() {}
+  virtual void AddOptions(cmdline::parser &parser) { parser.add<std::string>("pipe", 0, ""); }
+  virtual const char *Description() { return "Internal use only!"; }
+  virtual bool IsInternalOnly() { return true; }
+  virtual bool IsCaptureCommand() { return false; }
+  virtual bool Parse(cmdline::parser &parser, GlobalEnvironment &)
+  {
+    pipe = conv(parser.get<std::string>("pipe"));
+    return true;
+  }
+  virtual int Execute(const CaptureOptions &)
+  {
+    CrashGenerationServer *crashServer = NULL;
+
+    wchar_t tempPath[MAX_PATH] = {0};
+    GetTempPathW(MAX_PATH - 1, tempPath);
+
+    std::wstring dumpFolder = tempPath;
+
+    // create each parent directory separately, and use \\s
+
+    dumpFolder += L"RenderDoc";
+    CreateDirectoryW(dumpFolder.c_str(), NULL);
+
+    dumpFolder += L"\\dumps";
+    CreateDirectoryW(dumpFolder.c_str(), NULL);
+
+    crashServer =
+        new CrashGenerationServer(pipe.c_str(), NULL, OnClientConnected, NULL, OnClientCrashed,
+                                  NULL, OnClientExited, NULL, NULL, NULL, true, &dumpFolder);
+
+    if(!crashServer->Start())
+    {
+      delete crashServer;
+      crashServer = NULL;
+      return 1;
+    }
+
+    HANDLE readyEvent = CreateEventA(NULL, TRUE, FALSE, "RENDERDOC_CRASHHANDLE");
+
+    if(readyEvent != NULL)
+    {
+      SetEvent(readyEvent);
+
+      CloseHandle(readyEvent);
+    }
+
+    const int loopSleep = 100;
+    int elapsedTime = 0;
+
+    MSG msg;
+    ZeroMemory(&msg, sizeof(msg));
+    while(!exitServer)
+    {
+      // Check to see if any messages are waiting in the queue
+      while(PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
+      {
+        // Translate the message and dispatch it to WindowProc()
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+      }
+
+      // If the message is WM_QUIT, exit the while loop
+      if(msg.message == WM_QUIT)
+        break;
+
+      Sleep(loopSleep);
+      elapsedTime += loopSleep;
+
+      // break out of the loop if
+      if(elapsedTime > 5000 && !clientConnected)
+        break;
+    }
+
+    delete crashServer;
+    crashServer = NULL;
+
+    std::wstring wlogpath;
+
+    if(!wdump.empty())
+    {
+      std::string report = "{\n";
+
+      for(size_t i = 0; i < customInfo.size(); i++)
+      {
+        std::wstring name = customInfo[i].name;
+        std::wstring val = customInfo[i].value;
+
+        if(name == L"logpath")
+        {
+          wlogpath = val;
+        }
+        else if(name == L"ptime")
+        {
+          // breakpad uptime, ignore.
+        }
+        else
+        {
+          report += "  \"" + conv(name) + "\": \"" + conv(val) + "\",\n";
+        }
+      }
+
+      FILETIME filetime = {};
+      SYSTEMTIME systime = {};
+      GetSystemTimeAsFileTime(&filetime);
+      FileTimeToSystemTime(&filetime, &systime);
+
+      uint32_t milliseconds = 0;
+      milliseconds += systime.wHour;
+      milliseconds *= 60;
+      milliseconds += systime.wMinute;
+      milliseconds *= 60;
+      milliseconds += systime.wSecond;
+      milliseconds *= 1000;
+      milliseconds += systime.wMilliseconds;
+
+      std::string dumpId;
+
+      char base62[63] = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+      while(milliseconds > 0)
+      {
+        char c = base62[milliseconds % 63];
+        dumpId.push_back(base62[milliseconds % 62]);
+        milliseconds /= 62;
+      }
+
+      std::string reportPath = conv(dumpFolder) + "\\" + dumpId + ".zip";
+
+      {
+        rdcstr tmp = rdcstr(reportPath.c_str(), reportPath.size());
+        RENDERDOC_CreateBugReport(conv(wlogpath).c_str(), conv(wdump).c_str(), tmp);
+      }
+
+      for(size_t i = 0; i < reportPath.size(); i++)
+        if(reportPath[i] == '\\')
+          reportPath[i] = '/';
+
+      report += "  \n\"report\": \"" + reportPath + "\"\n";
+      report += "}\n";
+
+      {
+        std::wstring destjson = dumpFolder + L"\\" + conv(dumpId) + L".json";
+
+        FILE *f = NULL;
+        _wfopen_s(&f, destjson.c_str(), L"w");
+        if(!f)
+        {
+          OutputDebugStringA("Coudln't open report json");
+        }
+        else
+        {
+          fputs(report.c_str(), f);
+          fclose(f);
+
+          wchar_t *paramsAlloc = new wchar_t[512];
+
+          ZeroMemory(paramsAlloc, sizeof(wchar_t) * 512);
+
+          GetModuleFileNameW(NULL, paramsAlloc, 511);
+
+          wchar_t *lastSlash = wcsrchr(paramsAlloc, '\\');
+
+          if(lastSlash)
+            *lastSlash = 0;
+
+          std::wstring exepath = paramsAlloc;
+
+          ZeroMemory(paramsAlloc, sizeof(wchar_t) * 512);
+
+          _snwprintf_s(paramsAlloc, 511, 511, L"%s/qrenderdoc.exe --crash %s", exepath.c_str(),
+                       destjson.c_str());
+
+          PROCESS_INFORMATION pi;
+          STARTUPINFOW si;
+          ZeroMemory(&pi, sizeof(pi));
+          ZeroMemory(&si, sizeof(si));
+
+          BOOL success = CreateProcessW(NULL, paramsAlloc, NULL, NULL, FALSE, 0, NULL,
+                                        exepath.c_str(), &si, &pi);
+
+          if(success && pi.hProcess)
+          {
+            WaitForSingleObject(pi.hProcess, INFINITE);
+          }
+
+          if(pi.hProcess)
+            CloseHandle(pi.hProcess);
+          if(pi.hThread)
+            CloseHandle(pi.hThread);
+
+          std::wstring wreport = conv(reportPath);
+
+          DeleteFileW(wreport.c_str());
+          DeleteFileW(destjson.c_str());
+        }
+      }
+    }
+
+    if(!wdump.empty())
+      DeleteFileW(wdump.c_str());
+
+    if(!wlogpath.empty())
+      DeleteFileW(wlogpath.c_str());
+
+    return 0;
+  }
+};
 #endif
 
-	// this installs a global windows hook pointing at renderdocshim*.dll that filters all running processes and
-	// loads renderdoc.dll in the target one. In any other process it unloads as soon as possible
-	if(argc == 5 && argequal(argv[1], "--globalhook"))
-	{
-		char *pathmatch = argv[2];
-		char *log = argv[3];
+struct GlobalHookCommand : public Command
+{
+private:
+  std::wstring wpathmatch;
+  std::string capfile;
+  std::string debuglog;
+  std::string opts;
 
-		size_t len = strlen(pathmatch);
-		wstring wpathmatch; wpathmatch.resize(len);
-		MultiByteToWideChar(CP_UTF8, 0, pathmatch, -1, &wpathmatch[0], (int)len);
-		wpathmatch.resize(wcslen(wpathmatch.c_str()));
-		
-		CaptureOptions cmdopts;
-		readCapOpts(argv[4], &cmdopts);
+public:
+  GlobalHookCommand() {}
+  virtual void AddOptions(cmdline::parser &parser)
+  {
+    parser.add<std::string>("match", 0, "");
+    parser.add<std::string>("capfile", 0, "");
+    parser.add<std::string>("debuglog", 0, "");
+    parser.add<std::string>("capopts", 0, "");
+  }
+  virtual const char *Description() { return "Internal use only!"; }
+  virtual bool IsInternalOnly() { return true; }
+  virtual bool IsCaptureCommand() { return false; }
+  virtual bool Parse(cmdline::parser &parser, GlobalEnvironment &)
+  {
+    wpathmatch = conv(parser.get<std::string>("match"));
+    capfile = parser.get<std::string>("capfile");
+    debuglog = parser.get<std::string>("debuglog");
+    opts = parser.get<std::string>("capopts");
+    return true;
+  }
+  virtual int Execute(const CaptureOptions &)
+  {
+    CaptureOptions cmdopts;
+    cmdopts.DecodeFromString(rdcstr(opts.c_str(), opts.size()));
 
-		// make sure the user doesn't accidentally run this with 'a' as a parameter or something.
-		// "a.exe" is over 4 characters so this limit should not be a problem.
-		if(wpathmatch.length() < 4)
-		{
-			fprintf(stderr, "--globalhook path match is too short/general. Danger of matching too many processes!\n");
-			return 1;
-		}
+    // make sure the user doesn't accidentally run this with 'a' as a parameter or something.
+    // "a.exe" is over 4 characters so this limit should not be a problem.
+    if(wpathmatch.length() < 4)
+    {
+      std::cerr
+          << "globalhook path match is too short/general. Danger of matching too many processes!"
+          << std::endl;
+      return 1;
+    }
 
-		wchar_t rdocpath[1024];
+    wchar_t rdocpath[1024];
 
-		// fetch path to our matching renderdoc.dll
-		HMODULE rdoc = GetModuleHandleA("renderdoc.dll");
+    // fetch path to our matching renderdoc.dll
+    HMODULE rdoc = GetModuleHandleA("renderdoc.dll");
 
-		if(rdoc == NULL)
-		{
-			fprintf(stderr, "--globalhook couldn't find renderdoc.dll!\n");
-			return 1;
-		}
+    if(rdoc == NULL)
+    {
+      std::cerr << "globalhook couldn't find renderdoc.dll!" << std::endl;
+      return 1;
+    }
 
-		GetModuleFileNameW(rdoc, rdocpath, _countof(rdocpath)-1);
-		FreeLibrary(rdoc);
+    GetModuleFileNameW(rdoc, rdocpath, _countof(rdocpath) - 1);
+    FreeLibrary(rdoc);
 
-		// Create pipe from control program, to stay open until requested to close
-		HANDLE pipe = CreateFileW(L"\\\\.\\pipe\\"
-#ifdef WIN64
-			L"RenderDoc.GlobalHookControl64"
-#else
-			L"RenderDoc.GlobalHookControl32"
+    // Create stdin pipe from parent program, to stay open until requested to close
+    HANDLE pipe = GetStdHandle(STD_INPUT_HANDLE);
+
+    if(pipe == INVALID_HANDLE_VALUE)
+    {
+      std::cerr << "globalhook couldn't open stdin pipe.\n" << std::endl;
+      return 1;
+    }
+
+    HANDLE datahandle = OpenFileMappingA(FILE_MAP_READ, FALSE, GLOBAL_HOOK_DATA_NAME);
+
+    if(datahandle != NULL)
+    {
+      CloseHandle(pipe);
+      CloseHandle(datahandle);
+      std::cerr << "globalhook found pre-existing global data, not creating second global hook."
+                << std::endl;
+      return 1;
+    }
+
+    datahandle = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, sizeof(ShimData),
+                                    GLOBAL_HOOK_DATA_NAME);
+
+    if(datahandle)
+    {
+      ShimData *shimdata = (ShimData *)MapViewOfFile(datahandle, FILE_MAP_WRITE | FILE_MAP_READ, 0,
+                                                     0, sizeof(ShimData));
+
+      if(shimdata)
+      {
+        memset(shimdata, 0, sizeof(ShimData));
+
+        wcsncpy_s(shimdata->pathmatchstring, wpathmatch.c_str(), _TRUNCATE);
+        wcsncpy_s(shimdata->rdocpath, rdocpath, _TRUNCATE);
+        strncpy_s(shimdata->capfile, capfile.c_str(), _TRUNCATE);
+        strncpy_s(shimdata->debuglog, debuglog.c_str(), _TRUNCATE);
+        memcpy(shimdata->opts, &cmdopts, sizeof(CaptureOptions));
+
+        static_assert(sizeof(CaptureOptions) <= sizeof(shimdata->opts),
+                      "ShimData options is too small");
+
+        // wait until a write comes in over the pipe
+        char buf[16] = {0};
+        DWORD read = 0;
+        ReadFile(pipe, buf, sizeof(buf), &read, NULL);
+
+        UnmapViewOfFile(shimdata);
+      }
+      else
+      {
+        std::cerr << "globalhook couldn't map global data store." << std::endl;
+      }
+
+      CloseHandle(datahandle);
+    }
+    else
+    {
+      std::cerr << "globalhook couldn't create global data store." << std::endl;
+    }
+
+    CloseHandle(pipe);
+
+    return 0;
+  }
+};
+
+// ignore the argc/argv we get here, convert from wide to be sure we're unicode safe.
+int main(int, char *)
+{
+  LPWSTR *wargv;
+  int argc;
+
+  wargv = CommandLineToArgvW(GetCommandLine(), &argc);
+
+  std::vector<std::string> argv;
+
+  argv.resize(argc);
+  for(size_t i = 0; i < argv.size(); i++)
+    argv[i] = conv(std::wstring(wargv[i]));
+
+  if(argv.empty())
+    argv.push_back("renderdoccmd");
+
+  LocalFree(wargv);
+
+  hInstance = GetModuleHandleA(NULL);
+
+  WNDCLASSEX wc;
+  wc.cbSize = sizeof(WNDCLASSEX);
+  wc.style = 0;
+  wc.lpfnWndProc = WndProc;
+  wc.cbClsExtra = 0;
+  wc.cbWndExtra = 0;
+  wc.hInstance = hInstance;
+  wc.hIcon = LoadIcon(NULL, MAKEINTRESOURCE(IDI_ICON));
+  wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+  wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+  wc.lpszMenuName = NULL;
+  wc.lpszClassName = L"renderdoccmd";
+  wc.hIconSm = LoadIcon(NULL, MAKEINTRESOURCE(IDI_ICON));
+
+  if(!RegisterClassEx(&wc))
+  {
+    return 1;
+  }
+
+  GlobalEnvironment env;
+
+  // perform an upgrade of the UI
+  add_command("upgrade", new UpgradeCommand());
+
+#if CRASH_HANDLER
+  // special WIN32 option for launching the crash handler
+  add_command("crashhandle", new CrashHandlerCommand());
 #endif
-		                          , GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
 
-		if(pipe == INVALID_HANDLE_VALUE)
-		{
-			fprintf(stderr, "--globalhook couldn't open control pipe.\n");
-			return 1;
-		}
-		
-		HANDLE datahandle = OpenFileMappingA(FILE_MAP_READ, FALSE, GLOBAL_HOOK_DATA_NAME);
+  // this installs a global windows hook pointing at renderdocshim*.dll that filters all running
+  // processes and loads renderdoc.dll in the target one. In any other process it unloads as soon as
+  // possible
+  add_command("globalhook", new GlobalHookCommand());
 
-		if(datahandle != NULL)
-		{
-			CloseHandle(pipe);
-			CloseHandle(datahandle);
-			fprintf(stderr, "--globalhook found pre-existing global data, not creating second global hook.\n");
-			return 1;
-		}
-			
-		datahandle = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, sizeof(ShimData), GLOBAL_HOOK_DATA_NAME);
-
-		if(datahandle)
-		{
-			ShimData *shimdata = (ShimData *)MapViewOfFile(datahandle, FILE_MAP_WRITE|FILE_MAP_READ, 0, 0, sizeof(ShimData));
-
-			if(shimdata)
-			{
-				memset(shimdata, 0, sizeof(ShimData));
-
-				wcsncpy_s(shimdata->pathmatchstring, wpathmatch.c_str(), _TRUNCATE);
-				wcsncpy_s(shimdata->rdocpath, rdocpath, _TRUNCATE);
-				strncpy_s(shimdata->log, log, _TRUNCATE);
-				memcpy   (shimdata->opts, &cmdopts, sizeof(CaptureOptions));
-
-				static_assert(sizeof(CaptureOptions) <= sizeof(shimdata->opts), "ShimData options is too small");
-
-				// wait until a write comes in over the pipe
-				char buf[16];
-				DWORD read = 0;
-				ReadFile(pipe, buf, 16, &read, NULL);
-
-				UnmapViewOfFile(shimdata);
-			}
-			else
-			{
-				fprintf(stderr, "--globalhook couldn't map global data store.\n");
-			}
-			
-			CloseHandle(datahandle);
-		}
-		else
-		{
-			fprintf(stderr, "--globalhook couldn't create global data store.\n");
-		}
-		
-		CloseHandle(pipe);
-
-		return 0;
-	}
-
-	int retval = renderdoccmd(argc, argv);
-	
-	for(int i=0; i < argc; i++)
-		delete[] argv[i];
-	delete[] argv;
-
-	return retval;
+  return renderdoccmd(env, argv);
 }

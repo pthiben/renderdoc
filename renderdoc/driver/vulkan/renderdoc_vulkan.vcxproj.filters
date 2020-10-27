@@ -4,9 +4,6 @@
     <ClCompile Include="vk_win32.cpp">
       <Filter>OS\Win32</Filter>
     </ClCompile>
-    <ClCompile Include="vk_linux.cpp">
-      <Filter>OS\Linux</Filter>
-    </ClCompile>
     <ClCompile Include="vk_replay.cpp">
       <Filter>Replay</Filter>
     </ClCompile>
@@ -25,7 +22,7 @@
     <ClCompile Include="vk_dispatchtables.cpp">
       <Filter>Layer</Filter>
     </ClCompile>
-    <ClCompile Include="vk_tracelayer.cpp">
+    <ClCompile Include="vk_layer.cpp">
       <Filter>Layer</Filter>
     </ClCompile>
     <ClCompile Include="vk_manager.cpp">
@@ -82,6 +79,81 @@
     <ClCompile Include="vk_counters.cpp">
       <Filter>Replay</Filter>
     </ClCompile>
+    <ClCompile Include="vk_android.cpp">
+      <Filter>OS\Posix</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_posix.cpp">
+      <Filter>OS\Posix</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_linux.cpp">
+      <Filter>OS\Posix</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_ggp.cpp">
+      <Filter>OS\Posix</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_layer_android.cpp">
+      <Filter>OS\Posix</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_apple.cpp">
+      <Filter>OS\Posix</Filter>
+    </ClCompile>
+    <ClCompile Include="precompiled.cpp">
+      <Filter>PCH</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_stringise.cpp">
+      <Filter>Util</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_serialise.cpp">
+      <Filter>Util</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_sparse_initstate.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_postvs.cpp">
+      <Filter>Replay</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_overlay.cpp">
+      <Filter>Replay</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_outputwindow.cpp">
+      <Filter>Replay</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_rendermesh.cpp">
+      <Filter>Replay</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_msaa_array_conv.cpp">
+      <Filter>Replay</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_rendertexture.cpp">
+      <Filter>Replay</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_shader_cache.cpp">
+      <Filter>Util</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_rendertext.cpp">
+      <Filter>Util</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_next_chains.cpp">
+      <Filter>Util</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_bindless_feedback.cpp">
+      <Filter>Replay</Filter>
+    </ClCompile>
+    <ClCompile Include="imgrefs_tests.cpp">
+      <Filter>Util</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_pixelhistory.cpp">
+      <Filter>Replay</Filter>
+    </ClCompile>
+    <ClCompile Include="imagestate_tests.cpp">
+      <Filter>Util</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_image_states.cpp">
+      <Filter>Util</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_shaderdebug.cpp">
+      <Filter>Replay</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="vk_replay.h">
@@ -117,22 +189,67 @@
     <ClInclude Include="official\vk_layer.h">
       <Filter>official</Filter>
     </ClInclude>
-    <ClInclude Include="official\vk_lunarg_debug_marker.h">
-      <Filter>official</Filter>
-    </ClInclude>
     <ClInclude Include="official\vk_platform.h">
       <Filter>official</Filter>
     </ClInclude>
     <ClInclude Include="official\vulkan.h">
       <Filter>official</Filter>
     </ClInclude>
+    <ClInclude Include="precompiled.h">
+      <Filter>PCH</Filter>
+    </ClInclude>
+    <ClInclude Include="vk_shader_cache.h">
+      <Filter>Util</Filter>
+    </ClInclude>
+    <ClInclude Include="vk_rendertext.h">
+      <Filter>Util</Filter>
+    </ClInclude>
+    <ClInclude Include="official\vulkan_android.h">
+      <Filter>official</Filter>
+    </ClInclude>
+    <ClInclude Include="official\vulkan_core.h">
+      <Filter>official</Filter>
+    </ClInclude>
+    <ClInclude Include="official\vulkan_ios.h">
+      <Filter>official</Filter>
+    </ClInclude>
+    <ClInclude Include="official\vulkan_macos.h">
+      <Filter>official</Filter>
+    </ClInclude>
+    <ClInclude Include="official\vulkan_vi.h">
+      <Filter>official</Filter>
+    </ClInclude>
+    <ClInclude Include="official\vulkan_wayland.h">
+      <Filter>official</Filter>
+    </ClInclude>
+    <ClInclude Include="official\vulkan_win32.h">
+      <Filter>official</Filter>
+    </ClInclude>
+    <ClInclude Include="official\vulkan_xcb.h">
+      <Filter>official</Filter>
+    </ClInclude>
+    <ClInclude Include="official\vulkan_xlib.h">
+      <Filter>official</Filter>
+    </ClInclude>
+    <ClInclude Include="official\vulkan_xlib_xrandr.h">
+      <Filter>official</Filter>
+    </ClInclude>
+    <ClInclude Include="official\vulkan_fuchsia.h">
+      <Filter>official</Filter>
+    </ClInclude>
+    <ClInclude Include="official\vulkan_ggp.h">
+      <Filter>official</Filter>
+    </ClInclude>
+    <ClInclude Include="official\vulkan_metal.h">
+      <Filter>official</Filter>
+    </ClInclude>
+    <ClInclude Include="vk_dispatch_defs.h">
+      <Filter>Layer</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="OS">
       <UniqueIdentifier>{0ca21de2-97db-4118-afc5-32b4cd80a437}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="OS\Linux">
-      <UniqueIdentifier>{c6141a90-0765-4409-afe2-e59d683e5a5e}</UniqueIdentifier>
     </Filter>
     <Filter Include="OS\Win32">
       <UniqueIdentifier>{538183db-17ae-4e49-87d6-b8dc88bda2d3}</UniqueIdentifier>
@@ -155,10 +272,19 @@
     <Filter Include="official">
       <UniqueIdentifier>{9580e52e-f3ab-4ef9-80d1-c673e5f25ef7}</UniqueIdentifier>
     </Filter>
+    <Filter Include="OS\Posix">
+      <UniqueIdentifier>{c6141a90-0765-4409-afe2-e59d683e5a5e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="PCH">
+      <UniqueIdentifier>{356d20c5-9ffd-4c8d-86cc-4e674104f275}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <None Include="renderdoc.json">
       <Filter>Layer</Filter>
+    </None>
+    <None Include="vk_apple.mm">
+      <Filter>OS\Posix</Filter>
     </None>
   </ItemGroup>
 </Project>

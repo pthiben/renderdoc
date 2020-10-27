@@ -1,19 +1,19 @@
 /******************************************************************************
  * The MIT License (MIT)
- * 
- * Copyright (c) 2015-2016 Baldur Karlsson
+ *
+ * Copyright (c) 2019-2020 Baldur Karlsson
  * Copyright (c) 2014 Crytek
- * 
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
  * in the Software without restriction, including without limitation the rights
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -31,297 +31,553 @@
 
 #pragma once
 
-#include "common/common.h"
-
-#include <stdint.h>
-#include <stddef.h>
 #include <stdarg.h>
-
-#include <string>
-#include <vector>
-#include <map>
-using std::string;
-using std::vector;
-using std::map;
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <functional>
+#include "api/replay/rdcarray.h"
+#include "api/replay/rdcpair.h"
+#include "api/replay/rdcstr.h"
+#include "common/globalconfig.h"
 
 struct CaptureOptions;
+struct EnvironmentModification;
+struct PathEntry;
+enum class WindowingSystem : uint32_t;
+enum class ReplayStatus : uint32_t;
+typedef std::function<void(float)> RENDERDOC_ProgressCallback;
 
 namespace Process
 {
-	enum ModificationType
-	{
-		eEnvModification_Replace = 0,
+void RegisterEnvironmentModification(const EnvironmentModification &modif);
 
-		// prepend/append options will replace if there is no existing variable
-		eEnvModification_Append,          // append with no separators
-		eEnvModification_AppendColon,     // append, separated by colons
-		eEnvModification_AppendSemiColon, // append, separated by semi-colons
-		eEnvModification_AppendPlatform,  // append, separated by colons for linux & semi-colons for windows
+void ApplyEnvironmentModification();
 
-		eEnvModification_Prepend,          // prepend with no separators
-		eEnvModification_PrependColon,     // prepend, separated by colons
-		eEnvModification_PrependSemiColon, // prepend, separated by semi-colons
-		eEnvModification_PrependPlatform,  // prepend, separated by colons for linux & semi-colons for windows
-	};
-	struct EnvironmentModification
-	{
-		EnvironmentModification() : type(eEnvModification_Replace), name(""), value("") {}
-		EnvironmentModification(ModificationType t, const char *n, const char *v) : type(t), name(n), value(v) {}
-		ModificationType type;
-		string name;
-		string value;
-	};
-	void RegisterEnvironmentModification(EnvironmentModification modif);
+const char *GetEnvVariable(const char *name);
 
-	void ApplyEnvironmentModification();
+uint64_t GetMemoryUsage();
 
-	void StartGlobalHook(const char *pathmatch, const char *logfile, const CaptureOptions *opts);
-	uint32_t InjectIntoProcess(uint32_t pid, const char *logfile, const CaptureOptions *opts, bool waitForExit);
-	uint32_t LaunchProcess(const char *app, const char *workingDir, const char *cmdLine);
-	uint32_t LaunchAndInjectIntoProcess(const char *app, const char *workingDir, const char *cmdLine,
-										const char *logfile, const CaptureOptions *opts, bool waitForExit);
-	void *LoadModule(const char *module);
-	void *GetFunctionAddress(void *module, const char *function);
-	uint32_t GetCurrentPID();
+bool CanGlobalHook();
+bool StartGlobalHook(const char *pathmatch, const char *capturefile, const CaptureOptions &opts);
+bool IsGlobalHookActive();
+void StopGlobalHook();
+
+rdcpair<ReplayStatus, uint32_t> InjectIntoProcess(uint32_t pid,
+                                                  const rdcarray<EnvironmentModification> &env,
+                                                  const char *capturefile,
+                                                  const CaptureOptions &opts, bool waitForExit);
+struct ProcessResult
+{
+  rdcstr strStdout, strStderror;
+  int retCode;
+};
+uint32_t LaunchProcess(const char *app, const char *workingDir, const char *cmdLine, bool internal,
+                       ProcessResult *result = NULL);
+uint32_t LaunchScript(const char *script, const char *workingDir, const char *args, bool internal,
+                      ProcessResult *result = NULL);
+rdcpair<ReplayStatus, uint32_t> LaunchAndInjectIntoProcess(
+    const char *app, const char *workingDir, const char *cmdLine,
+    const rdcarray<EnvironmentModification> &env, const char *capturefile,
+    const CaptureOptions &opts, bool waitForExit);
+bool IsModuleLoaded(const char *module);
+void *LoadModule(const char *module);
+void *GetFunctionAddress(void *module, const char *function);
+uint32_t GetCurrentPID();
+
+void Shutdown();
 };
 
 namespace Timing
 {
-	double GetTickFrequency();
-	uint64_t GetTick();
-	uint64_t GetUnixTimestamp();
+double GetTickFrequency();
+uint64_t GetTick();
+uint64_t GetUnixTimestamp();
+time_t GetUTCTime();
 };
 
 namespace Threading
 {
-	template<class data>
-	class CriticalSectionTemplate
-	{
-		public:
-			CriticalSectionTemplate();
-			~CriticalSectionTemplate();
-			void Lock();
-			bool Trylock();
-			void Unlock();
+template <class data>
+class CriticalSectionTemplate
+{
+public:
+  CriticalSectionTemplate();
+  ~CriticalSectionTemplate();
+  void Lock();
+  bool Trylock();
+  void Unlock();
 
-		private:
-			// no copying
-			CriticalSectionTemplate &operator =(const CriticalSectionTemplate &other);
-			CriticalSectionTemplate(const CriticalSectionTemplate &other);
+  // no copying
+  CriticalSectionTemplate &operator=(const CriticalSectionTemplate &other) = delete;
+  CriticalSectionTemplate(const CriticalSectionTemplate &other) = delete;
 
-			data m_Data;
-	};
+  data m_Data;
+};
 
-	void Init();
-	void Shutdown();
-	uint64_t AllocateTLSSlot();
+template <class data>
+class RWLockTemplate
+{
+public:
+  RWLockTemplate();
+  ~RWLockTemplate();
 
-	void *GetTLSValue(uint64_t slot);
-	void SetTLSValue(uint64_t slot, void *value);
+  void ReadLock();
+  bool TryReadlock();
+  void ReadUnlock();
 
-	// must typedef CriticalSectionTemplate<X> CriticalSection
+  void WriteLock();
+  bool TryWritelock();
+  void WriteUnlock();
 
-	typedef void (*ThreadEntry)(void *);
-	typedef uint64_t ThreadHandle;
-	ThreadHandle CreateThread(ThreadEntry entryFunc, void *userData);
-	uint64_t GetCurrentID();
-	void JoinThread(ThreadHandle handle);
-	void CloseThread(ThreadHandle handle);
-	void Sleep(uint32_t milliseconds);
+  // no copying
+  RWLockTemplate &operator=(const RWLockTemplate &other) = delete;
+  RWLockTemplate(const RWLockTemplate &other) = delete;
 
-	// kind of windows specific, to handle this case:
-	// http://blogs.msdn.com/b/oldnewthing/archive/2013/11/05/10463645.aspx
-	void KeepModuleAlive();
-	void ReleaseModuleExitThread();
+  data m_Data;
+};
+
+void Init();
+void Shutdown();
+uint64_t AllocateTLSSlot();
+
+void *GetTLSValue(uint64_t slot);
+void SetTLSValue(uint64_t slot, void *value);
+
+// must typedef CriticalSectionTemplate<X> CriticalSection
+
+void SetCurrentThreadName(const rdcstr &name);
+
+typedef uint64_t ThreadHandle;
+ThreadHandle CreateThread(std::function<void()> entryFunc);
+uint64_t GetCurrentID();
+void JoinThread(ThreadHandle handle);
+void DetachThread(ThreadHandle handle);
+void CloseThread(ThreadHandle handle);
+void Sleep(uint32_t milliseconds);
+
+// kind of windows specific, to handle this case:
+// http://blogs.msdn.com/b/oldnewthing/archive/2013/11/05/10463645.aspx
+void KeepModuleAlive();
+void ReleaseModuleExitThread();
 };
 
 namespace Network
 {
-	class Socket
-	{
-		public:
-			Socket(ptrdiff_t s) : socket(s) {}
-			~Socket();
-			void Shutdown();
+class Socket
+{
+public:
+  Socket(ptrdiff_t s) : socket(s), timeoutMS(5000) {}
+  ~Socket();
+  void Shutdown();
 
-			bool Connected() const;
+  bool Connected() const;
 
-			Socket *AcceptClient(bool wait);
+  uint32_t GetTimeout() const { return timeoutMS; }
+  void SetTimeout(uint32_t milliseconds) { timeoutMS = milliseconds; }
+  Socket *AcceptClient(uint32_t timeoutMilliseconds);
 
-			bool IsRecvDataWaiting();
+  uint32_t GetRemoteIP() const;
 
-			bool SendDataBlocking(const void *buf, uint32_t length);
-			bool RecvDataBlocking(void *data, uint32_t length);
-		private:
-			ptrdiff_t socket;
-	};
+  bool IsRecvDataWaiting();
 
-	Socket *CreateServerSocket(const char *addr, uint16_t port, int queuesize);
-	Socket *CreateClientSocket(const char *host, uint16_t port, int timeoutMS);
-	
-	void Init();
-	void Shutdown();
+  bool SendDataBlocking(const void *buf, uint32_t length);
+  bool RecvDataBlocking(void *data, uint32_t length);
+  bool RecvDataNonBlocking(void *data, uint32_t &length);
+
+private:
+  ptrdiff_t socket;
+  uint32_t timeoutMS;
+};
+
+Socket *CreateServerSocket(const char *addr, uint16_t port, int queuesize);
+Socket *CreateClientSocket(const char *host, uint16_t port, int timeoutMS);
+
+// ip is packed in HOST byte order
+inline uint32_t GetIPOctet(uint32_t ip, uint32_t octet)
+{
+  uint32_t shift = (3 - octet) * 8;
+  uint32_t mask = 0xff << shift;
+
+  return (ip & mask) >> shift;
+}
+
+// returns ip packed in HOST byte order (ie. little endian)
+inline uint32_t MakeIP(uint32_t a, uint32_t b, uint32_t c, uint32_t d)
+{
+  return ((a & 0xff) << 24) | ((b & 0xff) << 16) | ((c & 0xff) << 8) | ((d & 0xff) << 0);
+}
+
+// checks if `ip` matches the given `range` and subnet `mask`
+inline bool MatchIPMask(uint32_t ip, uint32_t range, uint32_t mask)
+{
+  return (ip & mask) == (range & mask);
+}
+
+// parses the null-terminated string at 'str' for CIDR notation IP range
+// aaa.bbb.ccc.ddd/nn
+bool ParseIPRangeCIDR(const char *str, uint32_t &ip, uint32_t &mask);
+
+void Init();
+void Shutdown();
 };
 
 namespace Atomic
 {
-	int32_t Inc32(volatile int32_t *i);
-	int32_t Dec32(volatile int32_t *i);
-	int64_t Inc64(volatile int64_t *i);
-	int64_t Dec64(volatile int64_t *i);
-	int64_t ExchAdd64(volatile int64_t *i, int64_t a);
+int32_t Inc32(int32_t *i);
+int32_t Dec32(int32_t *i);
+int64_t Inc64(int64_t *i);
+int64_t Dec64(int64_t *i);
+int64_t ExchAdd64(int64_t *i, int64_t a);
+int32_t CmpExch32(int32_t *dest, int32_t oldVal, int32_t newVal);
 };
 
 namespace Callstack
 {
-	class Stackwalk
-	{
-	public:
-		virtual ~Stackwalk() {}
+class Stackwalk
+{
+public:
+  virtual ~Stackwalk() {}
+  virtual void Set(uint64_t *calls, size_t numLevels) = 0;
 
-		virtual void Set(uint64_t *calls, size_t numLevels) = 0;
+  virtual size_t NumLevels() const = 0;
+  virtual const uint64_t *GetAddrs() const = 0;
+};
 
-		virtual size_t NumLevels() const = 0;
-		virtual const uint64_t *GetAddrs() const = 0;
-	};
+struct AddressDetails
+{
+  AddressDetails() : line(0) {}
+  rdcstr function;
+  rdcstr filename;
+  uint32_t line;
 
-	struct AddressDetails
-	{
-		AddressDetails() : line(0) {}
+  rdcstr formattedString(const char *commonPath = NULL);
+};
 
-		string function;
-		string filename;
-		uint32_t line;
+class StackResolver
+{
+public:
+  virtual ~StackResolver() {}
+  virtual AddressDetails GetAddr(uint64_t addr) = 0;
+};
 
-		string formattedString(const char *commonPath = NULL);
-	};
+void Init();
 
-	class StackResolver
-	{
-	public:
-		virtual ~StackResolver() {}
-		virtual AddressDetails GetAddr(uint64_t addr) = 0;
-	};
+Stackwalk *Collect();
+Stackwalk *Create();
 
-	void Init();
+StackResolver *MakeResolver(bool interactive, byte *moduleDB, size_t DBSize,
+                            RENDERDOC_ProgressCallback);
 
-	Stackwalk *Collect();
-	Stackwalk *Create();
-
-	StackResolver *MakeResolver(char *moduleDB, size_t DBSize, string pdbSearchPaths, volatile bool *killSignal);
-
-	bool GetLoadedModules(char *&buf, size_t &size);
-}; // namespace Callstack
+bool GetLoadedModules(byte *buf, size_t &size);
+};    // namespace Callstack
 
 namespace FileIO
 {
-	void GetDefaultFiles(const char *logBaseName, string &capture_filename, string &logging_filename, string &target);
-	string GetAppFolderFilename(const string &filename);
-	string GetReplayAppFilename();
+void GetDefaultFiles(const char *logBaseName, rdcstr &capture_filename, rdcstr &logging_filename,
+                     rdcstr &target);
+rdcstr GetHomeFolderFilename();
+rdcstr GetAppFolderFilename(const rdcstr &filename);
+rdcstr GetTempFolderFilename();
+rdcstr GetReplayAppFilename();
 
-	void CreateParentDirectory(const string &filename);
+void CreateParentDirectory(const rdcstr &filename);
 
-	string GetFullPathname(const string &filename);
+bool IsRelativePath(const rdcstr &path);
+rdcstr GetFullPathname(const rdcstr &filename);
+rdcstr FindFileInPath(const rdcstr &fileName);
 
-	void GetExecutableFilename(string &selfName);
-	
-	uint64_t GetModifiedTimestamp(const string &filename);
-	
-	void Copy(const char *from, const char *to, bool allowOverwrite);
-	void Delete(const char *path);
+void GetExecutableFilename(rdcstr &selfName);
+void GetLibraryFilename(rdcstr &selfName);
 
-	FILE *fopen(const char *filename, const char *mode);
+uint64_t GetModifiedTimestamp(const rdcstr &filename);
+uint64_t GetFileSize(const rdcstr &filename);
 
-	size_t fread(void *buf, size_t elementSize, size_t count, FILE *f);
-	size_t fwrite(const void *buf, size_t elementSize, size_t count, FILE *f);
+bool Copy(const char *from, const char *to, bool allowOverwrite);
+bool Move(const char *from, const char *to, bool allowOverwrite);
+void Delete(const char *path);
+void GetFilesInDirectory(const char *path, rdcarray<PathEntry> &entries);
 
-	uint64_t ftell64(FILE *f);
-	void fseek64(FILE *f, uint64_t offset, int origin);
+FILE *fopen(const char *filename, const char *mode);
 
-	bool feof(FILE *f);
+size_t fread(void *buf, size_t elementSize, size_t count, FILE *f);
+size_t fwrite(const void *buf, size_t elementSize, size_t count, FILE *f);
 
-	int fclose(FILE *f);
+bool exists(const char *filename);
 
-	// utility functions
-	inline bool dump(const char *filename, const void *buffer, size_t size)
-	{
-		FILE *f = FileIO::fopen(filename, "wb");
-		if(f == NULL)
-			return false;
+rdcstr ErrorString();
 
-		size_t numWritten = FileIO::fwrite(buffer, 1, size, f);
+uint64_t ftell64(FILE *f);
+void fseek64(FILE *f, uint64_t offset, int origin);
 
-		FileIO::fclose(f);
+void ftruncateat(FILE *f, uint64_t length);
 
-		return numWritten == size;
-	}
+bool fflush(FILE *f);
 
-	inline bool slurp(const char *filename, vector<unsigned char> &buffer)
-	{
-		FILE *f = FileIO::fopen(filename, "rb");
-		if(f == NULL)
-			return false;
+bool feof(FILE *f);
 
-		FileIO::fseek64(f, 0, SEEK_END);
-		uint64_t size = ftell64(f);
-		FileIO::fseek64(f, 0, SEEK_SET);
+int fclose(FILE *f);
 
-		buffer.resize((size_t)size);
+// functions for atomically appending to a log that may be in use in multiple
+// processes
+struct LogFileHandle;
+LogFileHandle *logfile_open(const char *filename);
+void logfile_append(LogFileHandle *logHandle, const char *msg, size_t length);
+void logfile_close(LogFileHandle *logHandle, const char *deleteFilename);
 
-		size_t numRead = FileIO::fread(&buffer[0], 1, buffer.size(), f);
+// read the whole logfile into memory starting at a given offset. This may race with processes
+// writing, but it will read the whole of the file at some point. Useful since normal file reading
+// may fail on the shared logfile
+rdcstr logfile_readall(uint64_t offset, const char *filename);
 
-		FileIO::fclose(f);
+// utility functions
+inline bool WriteAll(const rdcstr &filename, const void *buffer, size_t size)
+{
+  FILE *f = FileIO::fopen(filename.c_str(), "wb");
+  if(f == NULL)
+    return false;
 
-		return numRead == buffer.size();
-	}
+  size_t numWritten = FileIO::fwrite(buffer, 1, size, f);
+
+  FileIO::fclose(f);
+
+  return numWritten == size;
+}
+
+template <typename T>
+bool WriteAll(const rdcstr &filename, const rdcarray<T> &buffer)
+{
+  return WriteAll(filename, buffer.data(), buffer.size() * sizeof(T));
+}
+
+inline bool WriteAll(const rdcstr &filename, const rdcstr &buffer)
+{
+  return WriteAll(filename, buffer.c_str(), buffer.length());
+}
+
+template <typename T>
+bool ReadAll(const rdcstr &filename, rdcarray<T> &buffer)
+{
+  FILE *f = FileIO::fopen(filename.c_str(), "rb");
+  if(f == NULL)
+    return false;
+
+  FileIO::fseek64(f, 0, SEEK_END);
+  uint64_t size = ftell64(f);
+  FileIO::fseek64(f, 0, SEEK_SET);
+
+  buffer.resize((size_t)size / sizeof(T));
+
+  size_t numRead = FileIO::fread(&buffer[0], sizeof(T), buffer.size(), f);
+
+  FileIO::fclose(f);
+
+  return numRead == buffer.size();
+}
+
+inline bool ReadAll(const rdcstr &filename, rdcstr &str)
+{
+  FILE *f = FileIO::fopen(filename.c_str(), "rb");
+  if(f == NULL)
+    return false;
+
+  char chunk[513];
+
+  while(!FileIO::feof(f))
+  {
+    memset(chunk, 0, 513);
+    size_t numRead = FileIO::fread(chunk, 1, 512, f);
+    str.append(chunk, numRead);
+  }
+
+  FileIO::fclose(f);
+
+  return true;
+}
 };
 
 namespace Keyboard
 {
-	void Init();
-	void AddInputWindow(void *wnd);
-	void RemoveInputWindow(void *wnd);
-	bool GetKeyState(int key);
+void Init();
+void AddInputWindow(WindowingSystem windowSystem, void *wnd);
+void RemoveInputWindow(WindowingSystem windowSystem, void *wnd);
+bool GetKeyState(int key);
+bool PlatformHasKeyInput();
+};
+
+// simple container for passing around temporary wide strings. We leave it immutable and manually
+// add the trailing NULL. These are used as rarely as possible but still needed for interacting with
+// windows/D3D APIs.
+struct rdcwstr : private rdcarray<wchar_t>
+{
+  rdcwstr() : rdcarray<wchar_t>() {}
+  rdcwstr(const wchar_t *str, size_t N) : rdcarray<wchar_t>(str, N)
+  {
+    // push null terminator
+    rdcarray<wchar_t>::push_back(0);
+  }
+  rdcwstr(const wchar_t *str)
+  {
+    while(*str)
+    {
+      rdcarray<wchar_t>::push_back(*str);
+      str++;
+    }
+    // push null terminator
+    rdcarray<wchar_t>::push_back(0);
+  }
+  template <size_t N>
+  rdcwstr(const wchar_t (&el)[N]) : rdcwstr(&el[0])
+  {
+  }
+  rdcwstr(size_t N) { resize(N + 1); }
+  wchar_t *data() { return rdcarray<wchar_t>::data(); }
+  const wchar_t *c_str() const { return rdcarray<wchar_t>::data(); }
+  using rdcarray<wchar_t>::operator[];
+  size_t length() const { return rdcarray<wchar_t>::size() - 1; }
 };
 
 // implemented per-platform
 namespace StringFormat
 {
-	void sntimef(char *str, size_t bufSize, const char *format);
+rdcstr sntimef(time_t utcTime, const char *format);
 
-	// forwards to vsnprintf below, needed to be here due to va_copy differences
-	string Fmt(const char *format, ...);
+rdcstr Wide2UTF8(const rdcwstr &str);
+rdcwstr UTF82Wide(const rdcstr &s);
 
-	string Wide2UTF8(const std::wstring &s);
-};
-
-// utility functions, implemented in os_specific.cpp, not per-platform (assuming standard stdarg.h)
-// forwarded to custom printf implementation in utf8printf.cpp
-namespace StringFormat
-{
-	int vsnprintf(char *str, size_t bufSize, const char *format, va_list v);
-	int snprintf(char *str, size_t bufSize, const char *format, ...);
-
-	int Wide2UTF8(wchar_t chr, char mbchr[4]);
+void Shutdown();
 };
 
 namespace OSUtility
 {
-	inline void ForceCrash();
-	inline void DebugBreak();
-	inline bool DebuggerPresent();
-	enum { Output_DebugMon, Output_StdOut, Output_StdErr };
-	void WriteOutput(int channel, const char *str);
+inline void ForceCrash();
+inline void DebugBreak();
+bool DebuggerPresent();
+enum
+{
+  Output_DebugMon,
+  Output_StdOut,
+  Output_StdErr
+};
+void WriteOutput(int channel, const char *str);
+
+enum MachineIdentBits
+{
+  MachineIdent_Windows = 0x00000001,
+  MachineIdent_Linux = 0x00000002,
+  MachineIdent_macOS = 0x00000004,
+  MachineIdent_Android = 0x00000008,
+  MachineIdent_iOS = 0x00000010,
+  // unused bits 0x20, 0x40, 0x80
+  MachineIdent_OS_Mask = 0x000000ff,
+
+  MachineIdent_Arch_x86 = 0x00000100,
+  MachineIdent_Arch_ARM = 0x00000200,
+  // unused bits 0x400, 0x800
+  MachineIdent_Arch_Mask = 0x00000f00,
+
+  MachineIdent_32bit = 0x00001000,
+  MachineIdent_64bit = 0x00002000,
+  MachineIdent_Width_Mask = (MachineIdent_64bit | MachineIdent_32bit),
+
+  // unused bits 0x4000, 0x8000
+
+  // not filled out as yet but reserved for future use
+  MachineIdent_GPU_ARM = 0x00010000,
+  MachineIdent_GPU_AMD = 0x00020000,
+  MachineIdent_GPU_IMG = 0x00040000,
+  MachineIdent_GPU_Intel = 0x00080000,
+  MachineIdent_GPU_NV = 0x00100000,
+  MachineIdent_GPU_QUALCOMM = 0x00200000,
+  MachineIdent_GPU_Samsung = 0x00400000,
+  MachineIdent_GPU_Verisilicon = 0x00800000,
+  MachineIdent_GPU_Mask = 0x0fff0000,
+};
+
+uint64_t GetMachineIdent();
+rdcstr MakeMachineIdentString(uint64_t ident);
+};
+
+namespace Bits
+{
+inline uint32_t CountLeadingZeroes(uint32_t value);
+#if ENABLED(RDOC_X64)
+inline uint64_t CountLeadingZeroes(uint64_t value);
+#endif
 };
 
 // must #define:
-// __PRETTY_FUNCTION_SIGNATURE__ - undecorated function signature
-// GetEmbeddedResource(name_with_underscores_ext) - function/inline that returns the given file in a std::string
-// OS_DEBUG_BREAK() - instruction that debugbreaks the debugger - define instead of function to preserve callstacks
+// GetEmbeddedResource(name_with_underscores_ext) - function/inline that returns the given file in a
+// rdcstr
+// EndianSwapXX() for XX = 16, 32, 64
 
-#ifdef RENDERDOC_PLATFORM
-// "win32_specific.h" (in directory os/)
-#include STRINGIZE(CONCAT(RENDERDOC_PLATFORM,_specific.h))
+#if ENABLED(RDOC_WIN32)
+#include "win32/win32_specific.h"
+#elif ENABLED(RDOC_POSIX)
+#include "posix/posix_specific.h"
 #else
 #error Undefined Platform!
 #endif
+
+inline uint64_t EndianSwap(uint64_t t)
+{
+  return EndianSwap64(t);
+}
+
+inline uint32_t EndianSwap(uint32_t t)
+{
+  return EndianSwap32(t);
+}
+
+inline uint16_t EndianSwap(uint16_t t)
+{
+  return EndianSwap16(t);
+}
+
+inline int64_t EndianSwap(int64_t t)
+{
+  return (int64_t)EndianSwap(uint64_t(t));
+}
+
+inline int32_t EndianSwap(int32_t t)
+{
+  return (int32_t)EndianSwap(uint32_t(t));
+}
+
+inline int16_t EndianSwap(int16_t t)
+{
+  return (int16_t)EndianSwap(uint16_t(t));
+}
+
+inline double EndianSwap(double t)
+{
+  uint64_t u;
+  memcpy(&u, &t, sizeof(t));
+  u = EndianSwap(u);
+  memcpy(&t, &u, sizeof(t));
+  return t;
+}
+
+inline float EndianSwap(float t)
+{
+  uint32_t u;
+  memcpy(&u, &t, sizeof(t));
+  u = EndianSwap(u);
+  memcpy(&t, &u, sizeof(t));
+  return t;
+}
+
+inline char EndianSwap(char t)
+{
+  return t;
+}
+
+inline byte EndianSwap(byte t)
+{
+  return t;
+}
+
+inline bool EndianSwap(bool t)
+{
+  return t;
+}
