@@ -33,3 +33,5 @@ ipch/
 *.shfbproj_*
 renderdoc/driver/vulkan/renderdoc_capture.json
 renderdocui/3rdparty/ironpython/pythonlibs.zip
+/renderdoc.VC.VC.opendb
+/renderdoc.VC.db
